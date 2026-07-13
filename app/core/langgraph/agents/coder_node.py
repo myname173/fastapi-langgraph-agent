@@ -609,6 +609,7 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
 
             # Layer 3: Post-processing — parse output, apply smart edits,
             # validate, count retries, escalate to human approval.
+            parse_failure_retry = 0  # set in except block when parse fails
             try:
                 parsed = CoderOutput.model_validate_json(response.content)
                 code_changes_data, validation_results, needs_approval = await _apply_smart_edits_and_validate(

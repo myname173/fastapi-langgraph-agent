@@ -6,7 +6,7 @@ separate from the chatbot endpoints.
 
 import json
 import uuid
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -40,9 +40,9 @@ def _json_default(obj: object) -> object:
     ``model_dump()``/``dict()`` so the SSE stream can serialize the full event.
     """
     if hasattr(obj, "model_dump"):
-        return obj.model_dump()
+        return cast(Any, obj).model_dump()
     if hasattr(obj, "dict"):
-        return obj.dict()
+        return cast(Any, obj).dict()
     return str(obj)
 
 
@@ -205,7 +205,7 @@ async def sdlc_get_feature_flags(
             "ENABLE_SMART_SEARCH": settings.ENABLE_SMART_SEARCH,
             "ENABLE_KNOWLEDGE_GRAPH": settings.ENABLE_KNOWLEDGE_GRAPH,
             "ENABLE_SMART_EDITING": settings.ENABLE_SMART_EDITING,
-            "ENABLE_CODE_INDEX": settings.ENABLE_CODE_INDEX,
+            "ENABLE_CODE_INDEX": settings.CODE_INDEX_ENABLED,
         }
     except Exception as e:
         logger.exception("sdlc_feature_flags_failed", error=str(e))

@@ -28,6 +28,7 @@ class MediaGenerationService:
     """DashScope native API service for image and video generation."""
 
     def __init__(self) -> None:
+        """Initialize DashScope API credentials and headers."""
         self._api_key = settings.OPENAI_API_KEY
         self._base_url = _DASHSCOPE_BASE
         self._headers = {

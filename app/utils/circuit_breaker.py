@@ -64,6 +64,7 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         cooldown_seconds: float = 60.0,
     ) -> None:
+        """Initialize circuit breaker state."""
         self.name = name
         self._failure_threshold = failure_threshold
         self._cooldown_seconds = cooldown_seconds
@@ -198,5 +199,6 @@ class CircuitOpenError(Exception):
     """Raised by :meth:`CircuitBreaker.call` when the circuit is open."""
 
     def __init__(self, breaker_name: str) -> None:
+        """Initialize with the name of the open circuit breaker."""
         self.breaker_name = breaker_name
         super().__init__(f"Circuit breaker '{breaker_name}' is open")

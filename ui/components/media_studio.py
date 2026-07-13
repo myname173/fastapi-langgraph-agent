@@ -37,7 +37,7 @@ def render_media_studio():
     with tab_image:
         with st.expander("Example prompts (click to use)", expanded=False):
             ex_cols = st.columns(len(img_examples))
-            for col, ex in zip(ex_cols, img_examples):
+            for col, ex in zip(ex_cols, img_examples, strict=False):
                 if col.button(ex[:30] + "\u2026", key=f"img_ex_{hash(ex)}", help=ex):
                     st.session_state.media_img_prompt = ex
 
@@ -79,13 +79,13 @@ def render_media_studio():
         if st.session_state.media_img_history:
             st.markdown("**History**")
             hist_cols = st.columns(min(len(st.session_state.media_img_history), 4))
-            for col, url in zip(hist_cols, st.session_state.media_img_history):
+            for col, url in zip(hist_cols, st.session_state.media_img_history, strict=False):
                 col.image(url)
 
     with tab_video:
         with st.expander("Example prompts (click to use)", expanded=False):
             ex_cols = st.columns(len(vid_examples))
-            for col, ex in zip(ex_cols, vid_examples):
+            for col, ex in zip(ex_cols, vid_examples, strict=False):
                 if col.button(ex[:30] + "\u2026", key=f"vid_ex_{hash(ex)}", help=ex):
                     st.session_state.media_vid_prompt = ex
 

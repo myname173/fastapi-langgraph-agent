@@ -33,6 +33,7 @@ class QuotaService:
     """Service for checking and enforcing resource quotas."""
 
     def __init__(self) -> None:
+        """Initialize per-user locks for quota enforcement."""
         # M-15 fix: per-user asyncio.Lock dict to serialize the
         # check-then-create sequence in reserve_task_slot(). Without this,
         # two concurrent create_task calls for the same user can both pass

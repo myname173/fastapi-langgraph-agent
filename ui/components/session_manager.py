@@ -175,7 +175,7 @@ def render_session_manager():
         # Status filter buttons
         filter_cols = st.columns(4)
         filters = ["All", "Active", "Done", "Error"]
-        for col, f in zip(filter_cols, filters):
+        for col, f in zip(filter_cols, filters, strict=False):
             if col.button(
                 f,
                 key=f"filter_{f}",

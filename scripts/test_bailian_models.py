@@ -124,6 +124,7 @@ def probe(api_key: str, base_url: str, model: str) -> tuple[bool, str]:
 
 
 def main() -> int:
+    """Run the Bailian model test suite and print results."""
     key = os.getenv("OPENAI_API_KEY", "")
     base = os.getenv(
         "OPENAI_BASE_URL",
