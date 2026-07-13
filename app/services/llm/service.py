@@ -1,0 +1,465 @@
+"""LLM service with retries, circular fallback, and optional structured output.
+
+Every public ``call`` proceeds through a **per-call local cursor** over the
+model registry. This eliminates the race condition that existed when the
+previous implementation mutated ``self._llm`` / ``self._current_model_index``
+globally mid-flight: concurrent requests can never see each other's model
+switches because fallback state is local to each invocation.
+
+Two distinct execution paths:
+
+- **Default path** (no model_name / response_format / model_kwargs): builds
+  a per-call target from the registry, binding tools fresh each attempt so
+  ``self._llm`` is never mutated.
+- **One-off path** (any override provided): resolves a fresh, local
+  ``Runnable`` for the call without touching ``self._llm``.
+"""
+
+import asyncio
+import logging
+from typing import (
+    Any,
+    Callable,
+    List,
+    Optional,
+    Type,
+    TypeVar,
+    Union,
+    overload,
+)
+
+from langchain_core.exceptions import OutputParserException
+from langchain_core.language_models import LanguageModelInput
+from langchain_core.messages import AIMessage, BaseMessage
+from openai import (
+    APIError,
+    APITimeoutError,
+    OpenAIError,
+    RateLimitError,
+)
+from pydantic import BaseModel
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+from app.core.config import settings
+from app.core.logging import logger
+from app.core.semantic_cache import semantic_cache
+from app.services.llm.registry import LLMRegistry
+
+T = TypeVar("T", bound=BaseModel)
+
+
+def _extract_cache_query(messages: LanguageModelInput) -> Optional[str]:
+    """Extract the last user message content for semantic cache lookup.
+
+    Args:
+        messages: LangChain language model input (list of dicts, messages,
+            or a plain string).
+
+    Returns:
+        The last user message content, or ``None`` if not extractable.
+    """
+    if isinstance(messages, str):
+        return messages
+    if isinstance(messages, list):
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                content = msg.get("content", "")
+                return str(content) if content else None
+    return None
+
+
+class LLMService:
+    """Service for managing LLM calls with retries and circular fallback.
+
+    Concurrency model
+    -----------------
+    ``self._llm`` and ``self._healthy_index`` are **read-only** after
+    initialisation. Per-call fallback walks a *local* cursor starting
+    from a snapshot of ``_healthy_index``. Tool bindings are constructed
+    fresh per attempt (cheap: ``bind_tools`` returns a lightweight wrapper),
+    so no global mutable state is touched during a call — safe under any
+    level of concurrency.
+    """
+
+    def __init__(self):
+        """Initialize the LLM service with the configured default model."""
+        self._llm: Any = None  # BaseChatModel; read-only after __init__
+        self._healthy_index: int = 0
+        self._bound_tools: List = []
+
+        all_names = LLMRegistry.get_all_names()
+        try:
+            self._healthy_index = all_names.index(settings.DEFAULT_LLM_MODEL)
+            self._llm = LLMRegistry.get(settings.DEFAULT_LLM_MODEL)
+            logger.info(
+                "llm_service_initialized",
+                default_model=settings.DEFAULT_LLM_MODEL,
+                model_index=self._healthy_index,
+                total_models=len(all_names),
+                environment=settings.ENVIRONMENT.value,
+            )
+        except Exception as e:
+            self._healthy_index = 0
+            self._llm = LLMRegistry.LLMS[0]["llm"]
+            logger.warning(
+                "default_model_not_found_using_first",
+                requested=settings.DEFAULT_LLM_MODEL,
+                using=all_names[0] if all_names else "none",
+                error=str(e),
+            )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    @overload
+    async def call(
+        self,
+        messages: LanguageModelInput,
+        model_name: Optional[str] = ...,
+        response_format: None = ...,
+        *,
+        cacheable: bool = ...,
+        cache_user_id: Optional[str] = ...,
+        **model_kwargs: Any,
+    ) -> BaseMessage: ...
+
+    @overload
+    async def call(
+        self,
+        messages: LanguageModelInput,
+        model_name: Optional[str] = ...,
+        *,
+        response_format: Type[T],
+        cacheable: bool = ...,
+        cache_user_id: Optional[str] = ...,
+        **model_kwargs: Any,
+    ) -> T: ...
+
+    async def call(
+        self,
+        messages: LanguageModelInput,
+        model_name: Optional[str] = None,
+        response_format: Optional[Type[BaseModel]] = None,
+        *,
+        cacheable: bool = False,
+        cache_user_id: Optional[str] = None,
+        **model_kwargs: Any,
+    ) -> Union[BaseMessage, BaseModel]:
+        """Call the LLM with retries and circular fallback.
+
+        Args:
+            messages: Conversation messages to send.
+            model_name: Override the model. ``None`` uses the current default.
+            response_format: Pydantic schema for structured output. When
+                provided the call chains ``.with_structured_output(schema)``
+                and returns a validated instance of that schema instead of a
+                raw ``BaseMessage``.
+            cacheable: When ``True`` and no ``response_format`` and no tools
+                are bound, check the semantic cache before calling the LLM.
+                On a hit, return the cached response as an ``AIMessage``
+                without making an LLM call.  On a miss, store the response
+                after the call succeeds.
+            cache_user_id: User ID for per-user cache scoping.  Required when
+                ``cacheable`` is ``True`` to avoid cross-user cache pollution.
+            **model_kwargs: Extra kwargs forwarded to ``LLMRegistry.get`` when
+                constructing a one-off model instance (e.g. ``temperature``,
+                ``max_tokens``, ``reasoning``).
+
+        Returns:
+            ``BaseMessage`` when ``response_format`` is ``None``, otherwise a
+            validated instance of ``response_format``.
+
+        Raises:
+            RuntimeError: When all models fail after retries or the total
+                timeout budget is exceeded.
+        """
+        # Check semantic cache for cacheable text-only calls (no tools, no
+        # structured output).  Tool calls are side-effectful and must not be
+        # cached; structured output is context-dependent.
+        if cacheable and response_format is None and not self._bound_tools:
+            query = _extract_cache_query(messages)
+            if query:
+                cached = await semantic_cache.get(
+                    "llm",
+                    cache_user_id,
+                    query,
+                    threshold=settings.SEMANTIC_CACHE_LLM_THRESHOLD,
+                )
+                if cached is not None:
+                    logger.info("llm_semantic_cache_hit", query_length=len(query))
+                    return AIMessage(content=cached)
+
+        try:
+            result = await asyncio.wait_for(
+                self._call_with_fallback(messages, model_name, response_format, model_kwargs),
+                timeout=settings.LLM_TOTAL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.exception(
+                "llm_total_timeout_exceeded",
+                timeout_seconds=settings.LLM_TOTAL_TIMEOUT,
+            )
+            raise RuntimeError(f"llm call timed out after {settings.LLM_TOTAL_TIMEOUT}s total budget")
+
+        # Store successful text-only responses in semantic cache.
+        if cacheable and response_format is None and not self._bound_tools:
+            if isinstance(result, BaseMessage) and isinstance(result.content, str):
+                query = _extract_cache_query(messages)
+                if query and result.content:
+                    await semantic_cache.set(
+                        "llm",
+                        cache_user_id,
+                        query,
+                        result.content,
+                        model_name=model_name or settings.DEFAULT_LLM_MODEL,
+                    )
+
+        return result
+
+    def get_llm(self) -> Any:
+        """Return the current default LLM instance (read-only).
+
+        This is used by callers that need to inspect the model name for
+        metrics labels. The returned instance is **never mutated** by
+        the fallback logic.
+
+        Returns:
+            Current ``BaseChatModel`` instance or ``None`` if not initialised.
+        """
+        return self._llm
+
+    def get_llm_for(self, model_name: Optional[str] = None) -> Any:
+        """Return a specific model instance for direct use (e.g. ``bind_tools``).
+
+        When ``model_name`` is ``None`` or matches the default, returns the
+        default instance (same as :meth:`get_llm`).  Otherwise returns a
+        fresh instance from the registry for the requested model.
+
+        Used by agent nodes that call ``bind_tools().ainvoke()`` directly
+        (coder, tester) instead of going through :meth:`call`.
+
+        Args:
+            model_name: Model name from :class:`ModelRouter`, or ``None``
+                for the default model.
+
+        Returns:
+            ``BaseChatModel`` instance.
+        """
+        if model_name is None:
+            return self._llm
+        return LLMRegistry.get(model_name)
+
+    def bind_tools(self, tools: List) -> "LLMService":
+        """Bind tools to the default LLM instance.
+
+        Args:
+            tools: List of tools to bind.
+
+        Returns:
+            Self for method chaining.
+        """
+        if self._llm:
+            self._bound_tools = tools
+            self._llm = self._llm.bind_tools(tools)
+            logger.debug("tools_bound_to_llm", tool_count=len(tools))
+        return self
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @retry(
+        stop=stop_after_attempt(settings.MAX_LLM_CALL_RETRIES),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIError, OutputParserException)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def _invoke_with_retry(self, llm: Any, messages: LanguageModelInput) -> Any:
+        """Invoke an LLM runnable with automatic per-model retry logic.
+
+        Args:
+            llm: Any LangChain ``Runnable`` (plain model or structured-output chain).
+            messages: Messages to send.
+
+        Returns:
+            The runnable's response (``BaseMessage`` or a ``BaseModel`` instance).
+
+        Raises:
+            OpenAIError: Propagated after all retry attempts are exhausted.
+            OutputParserException: Propagated after retries (M-7 fix:
+                structured-output parse failures now trigger retries
+                because the LLM may produce valid output on the next
+                attempt with a different sampling).
+        """
+        try:
+            response = await llm.ainvoke(messages)
+            logger.debug("llm_call_successful")
+            return response
+        except (RateLimitError, APITimeoutError, APIError) as e:
+            logger.warning(
+                "llm_call_failed_retrying",
+                error_type=type(e).__name__,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+        except OutputParserException as e:
+            # M-7 fix: retry on structured-output parse failures. The LLM
+            # may return valid JSON/schema on the next attempt.
+            logger.warning(
+                "llm_structured_output_parse_failed_retrying",
+                error_type=type(e).__name__,
+                error=str(e)[:200],
+                exc_info=True,
+            )
+            raise
+        except OpenAIError as e:
+            logger.error(
+                "llm_call_failed",
+                error_type=type(e).__name__,
+                error=str(e),
+            )
+            raise
+
+    def _build_target(self, idx: int, response_format: Optional[Type[BaseModel]], model_kwargs: dict) -> Any:
+        """Build a runnable for a given registry index.
+
+        For the default path (no kwargs/format override) this also binds
+        ``self._bound_tools`` so tool calling works. The returned runnable
+        is a fresh object — it does **not** mutate ``self._llm``.
+
+        Args:
+            idx: Index into ``LLMRegistry.LLMS``.
+            response_format: Optional Pydantic schema for structured output.
+            model_kwargs: Extra kwargs for the model constructor.
+
+        Returns:
+            A LangChain ``Runnable`` ready to invoke.
+        """
+        base = LLMRegistry.get(LLMRegistry.LLMS[idx]["name"], **model_kwargs)
+        if response_format:
+            return base.with_structured_output(response_format)
+        if self._bound_tools and not model_kwargs:
+            return base.bind_tools(self._bound_tools)
+        return base
+
+    def _advance_healthy_pointer(self, success_idx: int) -> None:
+        """Promote the successful model index to the healthy pointer.
+
+        Only called on the **success** path, never during fallback, so
+        concurrent callers never race on this write. In asyncio's
+        single-threaded model a simple assignment is safe.
+
+        Args:
+            success_idx: Registry index of the model that succeeded.
+        """
+        if success_idx != self._healthy_index:
+            self._healthy_index = success_idx
+            new_name = LLMRegistry.LLMS[success_idx]["name"]
+            logger.info("healthy_pointer_advanced", new_model=new_name, new_index=success_idx)
+
+    async def _call_with_fallback(
+        self,
+        messages: LanguageModelInput,
+        model_name: Optional[str],
+        response_format: Optional[Type[BaseModel]],
+        model_kwargs: dict,
+    ) -> Union[BaseMessage, BaseModel]:
+        """Build per-call strategy and delegate to the shared fallback loop.
+
+        Both default and override paths share the same loop — the only
+        difference is how ``get_target`` and ``start`` are resolved.
+        All fallback state is **local** (per-call cursor), so concurrent
+        requests never interfere.
+
+        When ``model_name`` is explicitly specified (override call, e.g.
+        session_naming → local-qwen-0.5b), the healthy pointer is NOT
+        advanced — otherwise a lightweight-model success would hijack the
+        default chat path's starting point.
+        """
+
+        def get_target(idx: int) -> Any:
+            return self._build_target(idx, response_format, model_kwargs)
+
+        is_model_override = bool(model_name)
+        if model_name or response_format or model_kwargs:
+            all_names = LLMRegistry.get_all_names()
+            if model_name and model_name not in all_names:
+                logger.error("requested_model_not_found", model_name=model_name)
+                raise ValueError(
+                    f"model '{model_name}' not found in registry. available models: {', '.join(all_names)}"
+                )
+            start = all_names.index(model_name) if model_name else self._healthy_index
+        else:
+            start = self._healthy_index
+
+        return await self._fallback_loop(messages, start, get_target, advance_health=not is_model_override)
+
+    async def _fallback_loop(
+        self,
+        messages: LanguageModelInput,
+        start: int,
+        get_target: Callable[[int], Any],
+        advance_health: bool = True,
+    ) -> Any:
+        """Per-call circular fallback — try each model in turn until success.
+
+        Args:
+            messages: Messages to send.
+            start: Registry index to begin from (snapshot of healthy pointer).
+            get_target: Returns the ``Runnable`` to invoke for a given index.
+            advance_health: When True, advance ``self._healthy_index`` on
+                success. Should be False for override calls (explicit
+                ``model_name``) so a lightweight-model success doesn't
+                hijack the default chat path's starting point.
+
+        Returns:
+            The first successful response.
+
+        Raises:
+            RuntimeError: When all models have been exhausted.
+        """
+        total = len(LLMRegistry.LLMS)
+        current = start
+        models_tried = 0
+        last_error: Optional[Exception] = None
+
+        for models_tried in range(1, total + 1):
+            current_name = LLMRegistry.LLMS[current]["name"]
+            try:
+                result = await self._invoke_with_retry(get_target(current), messages)
+                # Advance the healthy pointer (success-only, no race).
+                # Skipped for override calls to keep the default path stable.
+                if advance_health:
+                    self._advance_healthy_pointer(current)
+                return result
+            except OpenAIError as e:
+                last_error = e
+                logger.error(
+                    "llm_call_failed_after_retries",
+                    model=current_name,
+                    models_tried=models_tried,
+                    total_models=total,
+                    error=str(e),
+                )
+                if models_tried >= total:
+                    logger.error(
+                        "all_models_failed", models_tried=models_tried, starting_model=LLMRegistry.LLMS[start]["name"]
+                    )
+                    break
+                current = (current + 1) % total
+
+        raise RuntimeError(
+            f"failed to get response from llm after trying {models_tried} models. last error: {str(last_error)}"
+        )
+
+
+llm_service = LLMService()

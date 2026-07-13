@@ -1,0 +1,313 @@
+{
+  "id": null,
+  "uid": "sdlc-overview",
+  "title": "SDLC Orchestrator Overview",
+  "tags": [
+    "sdlc",
+    "agent",
+    "orchestrator"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 30,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Total Workflows",
+      "targets": [
+        {
+          "expr": "sum(sdlc_workflow_completed_total)",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 3
+      },
+      "stat": {
+        "valueMode": "current"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Success Rate",
+      "targets": [
+        {
+          "expr": "sum(sdlc_workflow_completed_total{status=\"success\"}) / sum(sdlc_workflow_completed_total) * 100",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 3
+      },
+      "stat": {
+        "valueMode": "current",
+        "suffix": "%"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Human Interventions",
+      "targets": [
+        {
+          "expr": "sum(sdlc_human_interventions_total)",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 3
+      },
+      "stat": {
+        "valueMode": "current"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Avg Workflow Duration",
+      "targets": [
+        {
+          "expr": "rate(sdlc_workflow_duration_seconds_sum[5m]) / rate(sdlc_workflow_duration_seconds_count[5m])",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 3
+      },
+      "stat": {
+        "valueMode": "current",
+        "suffix": "s"
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Agent Execution Time Heatmap",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sdlc_agent_execution_seconds_bucket[5m])) by (agent_name, le))",
+          "legendFormat": "{{agent_name}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 24,
+        "h": 12
+      },
+      "heatmap": {
+        "yAxis": {
+          "show": true
+        },
+        "xAxis": {
+          "show": true
+        },
+        "legend": {
+          "show": true
+        }
+      }
+    },
+    {
+      "type": "graph",
+      "title": "Agent Execution Duration (p95)",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sdlc_agent_execution_seconds_bucket[1m])) by (agent_name, le))",
+          "legendFormat": "{{agent_name}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 12,
+        "h": 9
+      },
+      "yAxes": [
+        {
+          "label": "Seconds",
+          "format": "s"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Workflow Completion Rate",
+      "targets": [
+        {
+          "expr": "rate(sdlc_workflow_completed_total{status=\"success\"}[1m])",
+          "legendFormat": "Success",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(sdlc_workflow_completed_total{status=\"fail\"}[1m])",
+          "legendFormat": "Failed",
+          "refId": "B"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 12,
+        "y": 15,
+        "w": 12,
+        "h": 9
+      },
+      "yAxes": [
+        {
+          "label": "Workflows/min",
+          "format": "none"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Human Intervention Rate",
+      "targets": [
+        {
+          "expr": "sum(rate(sdlc_human_interventions_total[1m])) by (agent_name)",
+          "legendFormat": "{{agent_name}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 9
+      },
+      "yAxes": [
+        {
+          "label": "Interventions/min",
+          "format": "none"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Token Usage by Agent",
+      "targets": [
+        {
+          "expr": "sum(rate(sdlc_token_usage_total[1m])) by (agent_name)",
+          "legendFormat": "{{agent_name}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 9
+      },
+      "yAxes": [
+        {
+          "label": "Tokens/min",
+          "format": "none"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Security Issues by Severity",
+      "targets": [
+        {
+          "expr": "sum(rate(sdlc_security_issues_total[1m])) by (severity)",
+          "legendFormat": "{{severity}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 12,
+        "h": 9
+      },
+      "yAxes": [
+        {
+          "label": "Issues/min",
+          "format": "none"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Agent Success Rate",
+      "targets": [
+        {
+          "expr": "sum(rate(sdlc_agent_execution_seconds_count{status=\"success\"}[1m])) by (agent_name) / sum(rate(sdlc_agent_execution_seconds_count[1m])) by (agent_name) * 100",
+          "legendFormat": "{{agent_name}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 12,
+        "y": 33,
+        "w": 12,
+        "h": 9
+      },
+      "yAxes": [
+        {
+          "label": "Success Rate %",
+          "format": "percent"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Workflow Duration",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sdlc_workflow_duration_seconds_bucket[1m])) by (status, le))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 24,
+        "h": 9
+      },
+      "yAxes": [
+        {
+          "label": "Seconds",
+          "format": "s"
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "agent_name",
+        "type": "query",
+        "query": "label_values(sdlc_agent_execution_seconds_count, agent_name)",
+        "datasource": "Prometheus",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" }
+}

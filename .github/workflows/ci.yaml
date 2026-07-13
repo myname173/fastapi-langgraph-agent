@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  checks:
+    name: Lint + Type Check + Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --all-groups
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Pyright type check
+        run: uv run pyright
+      - name: Pytest
+        run: uv run pytest tests/ -v --tb=short
+
+  # Conditional eval job — only runs when ENABLE_EVAL repository variable
+  # is set to "true" and Langfuse secrets are configured.
+  # Non-blocking: failures don't block PR merge.
+  eval:
+    name: LLM Evaluation (optional)
+    runs-on: ubuntu-latest
+    if: vars.ENABLE_EVAL == 'true'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --all-groups
+      - name: Run evals
+        env:
+          APP_ENV: production
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          EVALUATION_API_KEY: ${{ secrets.EVALUATION_API_KEY }}
+          EVALUATION_BASE_URL: ${{ secrets.EVALUATION_BASE_URL }}
+        run: uv run python -m evals.main --quick

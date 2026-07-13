@@ -1,0 +1,240 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    platform: linux/amd64
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - monitoring
+
+  # Valkey (Redis-compatible) cache — optional, set VALKEY_HOST=valkey in your .env to enable
+  valkey:
+    image: valkey/valkey:8.1.6-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: [ "CMD", "valkey-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - monitoring
+
+  # Single API service with dynamic environment
+  app:
+    build:
+      context: .
+      args:
+        APP_ENV: ${APP_ENV:-production}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./logs:/app/logs
+    env_file:
+      - .env.${APP_ENV:-production}
+    # Docker secrets — real API key is mounted read-only at
+    # /run/secrets/openai_api_key. config.py reads it via
+    # OPENAI_API_KEY_FILE (set in .env.production). Falls back to
+    # OPENAI_API_KEY env var for local `make dev` runs without Docker.
+    secrets:
+      - openai_api_key
+    environment:
+      - APP_ENV=${APP_ENV:-production}
+      # L-15 fix: JWT_SECRET_KEY is intentionally NOT set here. Previously
+      # this line had a predictable fallback ("supersecretkeythatshouldbe...")
+      # which (a) is 47 chars so it PASSED config.py's >=32-char production
+      # validation, and (b) overrode the real secret from .env.production
+      # because the `environment:` section takes precedence over `env_file:`.
+      # Now the value comes solely from .env.production (env_file above),
+      # which is the single source of truth. If the key is missing,
+      # config.py's production validator fails fast with a clear error.
+    # Allow app container to access host's vLLM service (host.docker.internal:8001).
+    # Required on Linux; Docker Desktop (Win/Mac) resolves this automatically.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: on-failure
+    networks:
+      - monitoring
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    networks:
+      - monitoring
+    restart: always
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/dashboards/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - monitoring
+    restart: always
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - monitoring
+    restart: always
+
+  # Streamlit Web UI — depends on the API service being healthy
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    ports:
+      - "8501:8501"
+    environment:
+      - UI_API_BASE_URL=http://app:8000
+    volumes:
+      - ./ui:/app/ui
+      - ./.streamlit:/app/.streamlit
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:8501/_stcore/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: on-failure
+    networks:
+      - monitoring
+
+  # Local vLLM inference service — Qwen2.5-0.5B-Instruct on GTX 1650 Ti.
+  # Used only by session_naming (lightweight role) via LLM_PROVIDER_OVERRIDES.
+  # app does NOT hard-depend on vllm — if it fails, LLMService falls back
+  # to cloud DashScope models automatically. To disable local inference,
+  # comment out this service and update LLM_PROVIDER_OVERRIDES in .env.
+  vllm:
+    image: vllm/vllm-openai:v0.8.5
+    init: true  # tini init process — reaps zombie children (fixes docker stop hang)
+    ports:
+      - "8001:8001"
+    volumes:
+      # Model weights pre-downloaded on host (container-internal download
+      # fails due to proxy issues). Read-only mount for safety.
+      - ../vllm-main/hf-models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    command:
+      - --model
+      - /models/Qwen2.5-0.5B-Instruct
+      - --served-model-name
+      - local-qwen-0.5b
+      - --gpu-memory-utilization
+      - "0.88"
+      - --max-model-len
+      - "4096"
+      - --max-num-seqs
+      - "4"
+      - --enforce-eager
+      - --dtype
+      - half
+      - --port
+      - "8001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s  # model loading takes ~30-60s on GTX 1650 Ti
+    restart: on-failure
+    networks:
+      - monitoring
+
+  # ===================================================================
+  # Cloudflare Tunnel — 免费公网 HTTPS 入口（opt-in，需显式启用）
+  # -------------------------------------------------------------------
+  # 启动方式：
+  #   docker compose --profile tunnel up
+  #
+  # 两种模式：
+  #   A) 快速隧道（默认，无需 Cloudflare 账号）：
+  #      - 启动后查看日志获取随机域名：docker compose logs cloudflared
+  #      - 日志中会出现 "https://*.trycloudflare.com" 链接
+  #      - 注意：每次重启 URL 会变，需同步更新 ALLOWED_ORIGINS
+  #
+  #   B) 命名隧道（持久 URL，需 Cloudflare 账号）：
+  #      1. 访问 https://one.dash.cloudflare.com/ → Networks → Tunnels 创建隧道
+  #      2. 在 .env.production 设置 CLOUDFLARE_TUNNEL_TOKEN=<你的 token>
+  #      3. 将下方 command 替换为：tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+  #      4. 在 Cloudflare 控制台绑定子域名 → http://app:8000
+  # ===================================================================
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    # 默认快速隧道模式；命名隧道请改为：tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel --url http://app:8000
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - monitoring
+    restart: on-failure
+
+networks:
+  monitoring:
+    driver: bridge
+
+volumes:
+  grafana-storage:
+  postgres-data:
+  valkey-data:
+
+# Docker secrets — file-based credential injection (read-only in container).
+# The source file on the host is gitignored (see secrets/.gitignore).
+# Inside the container the secret is available at /run/secrets/<name>.
+secrets:
+  openai_api_key:
+    file: ./secrets/openai_api_key.txt

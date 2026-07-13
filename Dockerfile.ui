@@ -1,0 +1,42 @@
+FROM python:3.13.2-slim
+
+# Streamlit UI image — lightweight, only installs the UI dependency group.
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=random \
+    PYTHONPATH=/app \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=on \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+# Install uv for fast, locked dependency installation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && pip install --upgrade pip uv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install locked dependencies (cached unless pyproject.toml / uv.lock change)
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --group ui
+
+# Copy the UI package
+COPY ui ./ui
+
+# Create a non-root user
+RUN useradd -m appuser && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8501
+
+# Streamlit native health endpoint: /_stcore/health (200 = healthy)
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=15s \
+    CMD curl -fsS http://localhost:8501/_stcore/health || exit 1
+
+CMD ["uv", "run", "streamlit", "run", "ui/app.py", \
+    "--server.port", "8501", \
+    "--server.address", "0.0.0.0", \
+    "--server.enableCORS", "false", \
+    "--server.enableXsrfProtection", "true"]

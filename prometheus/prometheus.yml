@@ -1,0 +1,23 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'fastapi'
+    metrics_path: '/metrics'
+    scheme: 'http'
+    static_configs:
+      - targets: ['app:8000']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  # Local vLLM inference service (Qwen2.5-0.5B on GTX 1650 Ti).
+  # Exposes standard vLLM /metrics: TTFT, TPOT, KV-cache usage, token throughput.
+  # Used only by session_naming (lightweight role) — expect low request volume.
+  - job_name: 'vllm'
+    metrics_path: '/metrics'
+    scheme: 'http'
+    static_configs:
+      - targets: ['vllm:8001']
