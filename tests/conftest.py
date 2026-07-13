@@ -33,13 +33,13 @@ os.environ["APP_ENV"] = "test"
 # Layer 2 (defense in depth): Override critical secrets with test-only
 # values via ``setdefault`` so we don't clobber values already set by the
 # test runner, but ensure non-empty test values exist if .env.test is absent.
-_TEST_JWT_SECRET = "test-secret-key-for-testing-only-not-for-production-use-32chars"
+_TEST_JWT_SECRET = "test-secret-key-for-testing-only-not-for-production-use-32chars"  # pragma: allowlist secret
 os.environ.setdefault("JWT_SECRET_KEY", _TEST_JWT_SECRET)
 os.environ.setdefault("JWT_ALGORITHM", "HS256")
-os.environ.setdefault("OPENAI_API_KEY", "sk-test-key-not-real")
+os.environ.setdefault("OPENAI_API_KEY", "sk-test-key-not-real")  # pragma: allowlist secret
 os.environ.setdefault("OPENAI_BASE_URL", "https://api.openai.com/v1")
-os.environ.setdefault("LANGFUSE_SECRET_KEY", "sk-lf-test")
-os.environ.setdefault("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+os.environ.setdefault("LANGFUSE_SECRET_KEY", "sk-lf-test")  # pragma: allowlist secret
+os.environ.setdefault("LANGFUSE_PUBLIC_KEY", "pk-lf-test")  # pragma: allowlist secret
 os.environ.setdefault("LANGFUSE_TRACING_ENABLED", "false")
 os.environ.setdefault("POSTGRES_PASSWORD", "test-password")
 os.environ.setdefault("POSTGRES_HOST", "localhost")
@@ -80,12 +80,12 @@ def _enforce_test_settings() -> Iterator[None]:
     overrides = {
         "JWT_SECRET_KEY": _TEST_JWT_SECRET,
         "JWT_ALGORITHM": "HS256",
-        "OPENAI_API_KEY": "sk-test-key-not-real",
+        "OPENAI_API_KEY": "sk-test-key-not-real",  # pragma: allowlist secret
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "LANGFUSE_SECRET_KEY": "sk-lf-test",
-        "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
+        "LANGFUSE_SECRET_KEY": "sk-lf-test",  # pragma: allowlist secret
+        "LANGFUSE_PUBLIC_KEY": "pk-lf-test",  # pragma: allowlist secret
         "LANGFUSE_TRACING_ENABLED": False,
-        "POSTGRES_PASSWORD": "test-password",
+        "POSTGRES_PASSWORD": "test-password",  # pragma: allowlist secret
         "DEBUG": False,
         "ENABLE_ASYNC_DB": False,
         "ENABLE_MCP_CLIENT": False,

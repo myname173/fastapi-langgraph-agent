@@ -1,32 +1,113 @@
+# CI 流水线 — 代码质量 + 测试 + 安全 + 构建验证 + LLM 评估
+# 触发条件：push 到 main/master 分支，或针对这些分支的 PR
+# 6 个 job 并行执行，互不阻塞（eval job 为可选，需配置仓库变量）
 name: CI
 
 on:
-  pull_request:
   push:
-    branches: [master]
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# 同一分支/PR 的新推送会取消旧的运行，节省 CI 资源
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  checks:
-    name: Lint + Type Check + Tests
+  # -----------------------------------------------------------------
+  # 1. 代码规范检查 — ruff lint + format 验证
+  # -----------------------------------------------------------------
+  lint:
+    name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --all-groups
-      - name: Ruff lint
-        run: uv run ruff check .
-      - name: Ruff format check
-        run: uv run ruff format --check .
-      - name: Pyright type check
-        run: uv run pyright
-      - name: Pytest
-        run: uv run pytest tests/ -v --tb=short
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
 
-  # Conditional eval job — only runs when ENABLE_EVAL repository variable
-  # is set to "true" and Langfuse secrets are configured.
-  # Non-blocking: failures don't block PR merge.
+  # -----------------------------------------------------------------
+  # 2. 静态类型检查 — pyright
+  # -----------------------------------------------------------------
+  typecheck:
+    name: Type Check (pyright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run pyright
+
+  # -----------------------------------------------------------------
+  # 3. 单元测试 — pytest（排除 slow 标记的慢测试）
+  #    测试全 mock 化（见 conftest.py），无需 DB/外部服务
+  # -----------------------------------------------------------------
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --group test
+      - run: uv run pytest tests/ -v --tb=short -m "not slow"
+
+  # -----------------------------------------------------------------
+  # 4. 密钥泄露扫描 — detect-secrets（复用 .secrets.baseline）
+  #    检测 git 跟踪文件中是否有新增未纳入 baseline 的密钥
+  # -----------------------------------------------------------------
+  security:
+    name: Secret Scan (detect-secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install detect-secrets
+      - name: Scan tracked files for new secrets
+        run: detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+
+  # -----------------------------------------------------------------
+  # 5. Docker 镜像构建验证 — 确保容器可构建（不推送）
+  #    使用 GitHub Actions 缓存加速后续构建
+  #    注意：实际推送由 deploy.yaml 的 CD 流水线负责
+  # -----------------------------------------------------------------
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: APP_ENV=production
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -----------------------------------------------------------------
+  # 6. LLM 评估（可选）— 需配置仓库变量 ENABLE_EVAL=true
+  #    且配置 Langfuse + OpenAI secrets
+  #    非阻塞：失败不阻塞 PR 合并（continue-on-error: true）
+  # -----------------------------------------------------------------
   eval:
     name: LLM Evaluation (optional)
     runs-on: ubuntu-latest
@@ -34,10 +115,13 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --all-groups
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-extras --all-groups
       - name: Run evals
         env:
           APP_ENV: production

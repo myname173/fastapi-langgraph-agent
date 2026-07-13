@@ -40,7 +40,7 @@ class TestRegisterEndpoint:
             "/api/v1/auth/register",
             json={
                 "email": "new@test.com",
-                "password": "StrongPass123!",
+                "password": "StrongPass123!",  # pragma: allowlist secret
                 "username": "new_user",
             },
         )
@@ -58,7 +58,7 @@ class TestRegisterEndpoint:
 
         response = await async_client.post(
             "/api/v1/auth/register",
-            json={"email": "dup@test.com", "password": "StrongPass123!"},
+            json={"email": "dup@test.com", "password": "StrongPass123!"},  # pragma: allowlist secret
         )
 
         assert response.status_code == 400
@@ -68,7 +68,7 @@ class TestRegisterEndpoint:
         """Password without uppercase/digit/special returns 422."""
         response = await async_client.post(
             "/api/v1/auth/register",
-            json={"email": "weak@test.com", "password": "weakpass"},
+            json={"email": "weak@test.com", "password": "weakpass"},  # pragma: allowlist secret
         )
 
         assert response.status_code == 422
@@ -77,7 +77,7 @@ class TestRegisterEndpoint:
         """Malformed email returns 422."""
         response = await async_client.post(
             "/api/v1/auth/register",
-            json={"email": "not-an-email", "password": "StrongPass123!"},
+            json={"email": "not-an-email", "password": "StrongPass123!"},  # pragma: allowlist secret
         )
 
         assert response.status_code == 422
@@ -88,14 +88,14 @@ class TestLoginEndpoint:
 
     async def test_login_success(self, async_client, mock_db, make_fake_user):
         """Correct credentials return a token."""
-        fake_user = make_fake_user(email="login@test.com", password="StrongPass123!")
+        fake_user = make_fake_user(email="login@test.com", password="StrongPass123!")  # pragma: allowlist secret
         mock_db.get_user_by_email.return_value = fake_user
 
         response = await async_client.post(
             "/api/v1/auth/login",
             data={
                 "email": "login@test.com",
-                "password": "StrongPass123!",
+                "password": "StrongPass123!",  # pragma: allowlist secret
                 "grant_type": "password",
             },
         )
@@ -108,12 +108,16 @@ class TestLoginEndpoint:
 
     async def test_login_wrong_password_returns_401(self, async_client, mock_db, make_fake_user):
         """Wrong password returns 401."""
-        fake_user = make_fake_user(email="login@test.com", password="CorrectPass123!")
+        fake_user = make_fake_user(email="login@test.com", password="CorrectPass123!")  # pragma: allowlist secret
         mock_db.get_user_by_email.return_value = fake_user
 
         response = await async_client.post(
             "/api/v1/auth/login",
-            data={"email": "login@test.com", "password": "WrongPass123!", "grant_type": "password"},
+            data={
+                "email": "login@test.com",
+                "password": "WrongPass123!",
+                "grant_type": "password",
+            },  # pragma: allowlist secret
         )
 
         assert response.status_code == 401
@@ -124,7 +128,11 @@ class TestLoginEndpoint:
 
         response = await async_client.post(
             "/api/v1/auth/login",
-            data={"email": "nobody@test.com", "password": "AnyPass123!", "grant_type": "password"},
+            data={
+                "email": "nobody@test.com",
+                "password": "AnyPass123!",
+                "grant_type": "password",
+            },  # pragma: allowlist secret
         )
 
         assert response.status_code == 401
@@ -133,7 +141,11 @@ class TestLoginEndpoint:
         """Unsupported grant_type returns 400."""
         response = await async_client.post(
             "/api/v1/auth/login",
-            data={"email": "x@test.com", "password": "AnyPass123!", "grant_type": "client_credentials"},
+            data={
+                "email": "x@test.com",
+                "password": "AnyPass123!",
+                "grant_type": "client_credentials",
+            },  # pragma: allowlist secret
         )
 
         assert response.status_code == 400

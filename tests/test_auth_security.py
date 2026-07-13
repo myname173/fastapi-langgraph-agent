@@ -36,7 +36,7 @@ def _make_forged_token(thread_id: str) -> str:
     expire = datetime.now(UTC) + timedelta(days=1)
     payload = {"sub": thread_id, "exp": expire, "iat": datetime.now(UTC)}
     # Sign with a wrong secret — verify_token should reject this
-    return jwt.encode(payload, "wrong-secret-key-not-the-real-one", algorithm="HS256")
+    return jwt.encode(payload, "wrong-secret-key-not-the-real-one", algorithm="HS256")  # pragma: allowlist secret
 
 
 def _make_tampered_token(thread_id: str, new_sub: str) -> str:
