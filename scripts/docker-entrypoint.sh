@@ -50,6 +50,17 @@ fi
 
 # Check required sensitive environment variables
 required_vars=("JWT_SECRET_KEY" "OPENAI_API_KEY")
+
+# Support Docker secrets _FILE convention: if VAR is empty but VAR_FILE
+# points to a readable file, load VAR from that file.
+for var in "${required_vars[@]}"; do
+    file_var="${var}_FILE"
+    if [[ -z "${!var}" && -n "${!file_var}" && -f "${!file_var}" ]]; then
+        export "$var=$(cat "${!file_var}")"
+        echo "Loaded $var from ${!file_var}"
+    fi
+done
+
 missing_vars=()
 
 for var in "${required_vars[@]}"; do

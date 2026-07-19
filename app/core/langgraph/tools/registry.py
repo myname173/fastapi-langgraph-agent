@@ -243,6 +243,7 @@ def _build_default_registry() -> ToolRegistry:
     from app.core.langgraph.tools.asset_tools import asset_tools_list
     from app.core.langgraph.tools.code_index_tools import code_index_tools_list
     from app.core.langgraph.tools.duckduckgo_search import duckduckgo_search_tool
+    from app.core.langgraph.tools.knowledge_base_tools import knowledge_base_tools_list
     from app.core.langgraph.tools.media_tools import media_tools_list
     from app.core.langgraph.tools.sdlc_tools import sdlc_tools_list
 
@@ -251,6 +252,16 @@ def _build_default_registry() -> ToolRegistry:
     # -- Chat agent (LangGraphAgent) -------------------------------------
     registry.register(duckduckgo_search_tool, agents={"chat"}, tags={"search", "web"})
     registry.register(ask_human, agents={"chat"}, tags={"human_loop"})
+
+    # -- Knowledge base tools (chat agent searches user-uploaded docs) --
+    # Gated by ENABLE_KNOWLEDGE_BASE — invisible to LLM when flag is off.
+    for kb_tool in knowledge_base_tools_list:
+        registry.register(
+            kb_tool,
+            agents={"chat"},
+            requires={"ENABLE_KNOWLEDGE_BASE"},
+            tags={"knowledge", "rag"},
+        )
 
     # -- SDLC tools ------------------------------------------------------
     # Agent-to-tool mapping mirrors the former hard-coded bindings in

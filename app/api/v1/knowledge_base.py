@@ -10,7 +10,7 @@ Documents are isolated per-user (shared across all tasks).
 
 from typing import List
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from app.api.v1.auth import get_current_user
@@ -47,6 +47,15 @@ class DocumentDeleteResponse(BaseModel):
 
     doc_id: str = Field(..., description="Document UUID that was deleted")
     deleted_count: int = Field(..., description="Number of chunks removed")
+
+
+class SearchResult(BaseModel):
+    """Response model for a single knowledge base search result."""
+
+    content: str = Field(..., description="Matching text passage")
+    score: float = Field(..., description="Relevance score (0.0 - 1.0)")
+    filename: str = Field(..., description="Source document filename")
+    doc_id: str = Field(..., description="Document UUID")
 
 
 @router.post("/upload", response_model=DocumentUploadResponse)
@@ -204,3 +213,46 @@ async def delete_document(
     except Exception as e:
         logger.exception("kb_delete_failed", user_id=user.id, doc_id=doc_id, error=str(e))
         raise safe_500(e, context="kb_delete_document")
+
+
+@router.get("/search", response_model=List[SearchResult])
+@limiter.limit("30 per minute")
+async def search_knowledge_base(
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=500, description="Search query"),
+    limit: int = Query(5, ge=1, le=10, description="Max results"),
+    user: User = Depends(get_current_user),
+):
+    """Search the user's knowledge base for relevant passages.
+
+    Returns semantic search results ranked by relevance score.
+    """
+    try:
+        if not settings.ENABLE_KNOWLEDGE_BASE:
+            raise HTTPException(
+                status_code=404,
+                detail="Knowledge base is disabled (ENABLE_KNOWLEDGE_BASE=false)",
+            )
+
+        query = sanitize_string(q)
+        results = await knowledge_base_service.search(
+            user_id=str(user.id),
+            query=query,
+            limit=limit,
+        )
+        logger.info("kb_search_api", user_id=user.id, query=query, result_count=len(results))
+        return [
+            SearchResult(
+                content=r["content"],
+                score=r["score"],
+                filename=r["filename"],
+                doc_id=r["doc_id"],
+            )
+            for r in results
+        ]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("kb_search_failed", user_id=user.id, error=str(e))
+        raise safe_500(e, context="kb_search")

@@ -157,11 +157,13 @@ class LangGraphAgent:
             raise Exception(f"failed to get llm response after trying all models: {str(e)}")
 
     # Define our tool node
-    async def _tool_call(self, state: GraphState) -> Command:
+    async def _tool_call(self, state: GraphState, config: RunnableConfig) -> Command:
         """Process tool calls from the last message.
 
         Args:
             state: The current agent state containing messages and tool calls.
+            config: The runnable configuration, passed through to tools so
+                they can access ``config["metadata"]["user_id"]`` etc.
 
         Returns:
             Command: Command object with updated messages and routing back to chat.
@@ -169,7 +171,7 @@ class LangGraphAgent:
         tool_calls = state["messages"][-1].tool_calls
 
         async def _execute_tool(tool_call: dict) -> ToolMessage:
-            tool_result = await self._registry.get_by_name(tool_call["name"]).ainvoke(tool_call["args"])
+            tool_result = await self._registry.get_by_name(tool_call["name"]).ainvoke(tool_call["args"], config=config)
             return ToolMessage(
                 content=tool_result,
                 name=tool_call["name"],
