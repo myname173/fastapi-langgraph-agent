@@ -175,7 +175,17 @@ class TestSupervisorRouting:
             patch("app.core.langgraph.agents.supervisor_node.prepare_sdlc_messages", return_value=[]),
             patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
         ):
-            result = await node(_base_state(), _config())
+            result = await node(
+                _base_state(
+                    plan=[{"step": "done"}],
+                    code_changes=[
+                        {"file_path": "done.py", "change_type": "create", "content": "", "commit_message": ""}
+                    ],
+                    test_results=[{"passed": True, "message": "ok"}],
+                    feedback=[{"agent_name": "reviewer", "content": "ok", "severity": "low"}],
+                ),
+                _config(),
+            )
 
         assert result.goto == END
         assert result.update["is_complete"] is True
@@ -192,7 +202,17 @@ class TestSupervisorRouting:
             patch("app.core.langgraph.agents.supervisor_node.prepare_sdlc_messages", return_value=[]),
             patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
         ):
-            result = await node(_base_state(), _config())
+            result = await node(
+                _base_state(
+                    plan=[{"step": "done"}],
+                    code_changes=[
+                        {"file_path": "done.py", "change_type": "create", "content": "", "commit_message": ""}
+                    ],
+                    test_results=[{"passed": True, "message": "ok"}],
+                    feedback=[{"agent_name": "reviewer", "content": "ok", "severity": "low"}],
+                ),
+                _config(),
+            )
 
         assert result.goto == END
 

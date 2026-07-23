@@ -183,6 +183,43 @@ class TestSaveOutputFile:
         file_path = self.workspace / self.thread_id / "outputs" / "a" / "b" / "c" / "deep.txt"
         assert file_path.exists()
 
+    def test_save_file_rejects_disallowed_extension(self):
+        """save_output_file must reject extensions outside the whitelist.
+
+        Mirrors write_file / download_asset. Without this check an agent
+        could drop an arbitrary ``.exe`` / ``.sh`` into the workspace.
+        """
+        result = save_output_file.invoke(
+            {
+                "thread_id": self.thread_id,
+                "content": "malicious",
+                "filename": "payload.exe",
+            }
+        )
+
+        assert result["success"] is False
+        assert "not allowed" in result["error"].lower()
+        # Nothing should have been written to disk.
+        file_path = self.workspace / self.thread_id / "outputs" / "payload.exe"
+        assert not file_path.exists()
+
+    def test_save_file_rejects_oversized_content(self, monkeypatch):
+        """save_output_file must reject content over the size cap."""
+        from app.core.config import settings
+
+        big = "x" * 100  # 100 bytes
+        monkeypatch.setattr(settings, "SDLC_MAX_FILE_SIZE", 10)
+        result = save_output_file.invoke(
+            {
+                "thread_id": self.thread_id,
+                "content": big,
+                "filename": "big.txt",
+            }
+        )
+
+        assert result["success"] is False
+        assert "exceeds" in result["error"].lower()
+
 
 class TestSecurityValidation:
     """Tests for security validation functions."""

@@ -4,6 +4,7 @@ import re
 from typing import (
     List,
     Literal,
+    Optional,
 )
 
 from pydantic import (
@@ -53,17 +54,71 @@ class Message(BaseModel):
         return v
 
 
+class ChatImage(BaseModel):
+    """A single image attached to a chat message.
+
+    Only ``url`` (http/https) and ``base64`` (data:image/...;base64,...) are
+    accepted. The number of images per request is capped by ``ChatRequest``.
+    """
+
+    model_config = {"extra": "ignore"}
+
+    type: Literal["url", "base64"] = "url"
+    data: str = Field(..., description="http(s) URL or a data:image/...;base64,... string")
+
+    @field_validator("data")
+    @classmethod
+    def _validate_data(cls, v: str) -> str:
+        """Validate that ``data`` is a URL or a base64 image data URL.
+
+        Args:
+            v: The raw image data string.
+
+        Returns:
+            str: The validated data string.
+
+        Raises:
+            ValueError: If the data is empty or of an unsupported scheme.
+        """
+        if not v:
+            raise ValueError("image data must not be empty")
+        if v.startswith("data:"):
+            if not v.startswith("data:image/") or ";base64," not in v:
+                raise ValueError("base64 image must be a data:image/...;base64,... string")
+        elif not v.startswith(("http://", "https://")):
+            raise ValueError("image data must be a URL (http/https) or a data:image base64 string")
+        return v
+
+
+class InvestmentImageAnalysis(BaseModel):
+    """Structured result of investment-image analysis by the vision model.
+
+    Designed to describe only (no buy/sell advice) for chat investment use.
+    """
+
+    image_id: str = Field(..., description="图片标识")
+    description: str = Field(..., description="图片内容与关键要素的通俗描述")
+    key_elements: List[str] = Field(default_factory=list, description="关键要素列表")
+
+
 class ChatRequest(BaseModel):
     """Request model for chat endpoint.
 
     Attributes:
         messages: List of messages in the conversation.
+        images: Optional images attached to the latest user message. Recognized
+            only when ``ENABLE_MULTIMODAL`` is on; otherwise ignored server-side.
     """
 
     messages: List[Message] = Field(
         ...,
         description="List of messages in the conversation",
         min_length=1,
+    )
+    images: Optional[List[ChatImage]] = Field(
+        default=None,
+        max_length=4,
+        description="Optional images for the latest user message (max 4)",
     )
 
 

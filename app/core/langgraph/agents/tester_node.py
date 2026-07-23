@@ -14,7 +14,7 @@ from app.core.langgraph.agents.context import (
 )
 from app.core.langgraph.agents.supervisor_node import NodeCallable
 from app.core.logging import logger
-from app.core.metrics import sdlc_agent_execution_seconds
+from app.core.metrics import mcp_tool_calls_total, sdlc_agent_execution_seconds
 from app.core.prompts import load_agent_prompt
 from app.schemas import SDLCState, TesterOutput
 from app.services.llm.usage_tracker import set_llm_context
@@ -68,14 +68,23 @@ def make_tester_node(ctx: AgentContext) -> NodeCallable:
                             result_str = str(result)
                             test_output_parts.append(result_str)
                             tool_messages.append(ToolMessage(content=result_str, tool_call_id=tool_call["id"]))
+                            # MCP tool invocation metric — success path.
+                            if tool_name.startswith("mcp_"):
+                                mcp_tool_calls_total.labels(tool=tool_name, status="success").inc()
                         except Exception as tool_err:
                             err_msg = f"Tool {tool_name} failed: {tool_err}"
                             test_output_parts.append(err_msg)
                             tool_messages.append(ToolMessage(content=err_msg, tool_call_id=tool_call["id"]))
+                            # MCP tool invocation metric — failure path.
+                            if tool_name.startswith("mcp_"):
+                                mcp_tool_calls_total.labels(tool=tool_name, status="failed").inc()
                     else:
                         err_msg = f"Unknown tool: {tool_name}"
                         test_output_parts.append(err_msg)
                         tool_messages.append(ToolMessage(content=err_msg, tool_call_id=tool_call["id"]))
+                        # Defensive: unknown mcp_* tool means registry desync.
+                        if tool_name.startswith("mcp_"):
+                            mcp_tool_calls_total.labels(tool=tool_name, status="failed").inc()
 
                 # Auto-invoke run_tests if the LLM didn't call it. The tester
                 # LLM frequently calls list_directory/search_code to inspect

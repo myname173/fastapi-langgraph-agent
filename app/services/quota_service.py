@@ -54,6 +54,7 @@ class QuotaService:
         # to (date_string, count). In-memory only — resets on restart,
         # which is acceptable for best-effort free-quota protection.
         self._media_counts: dict[int, tuple[str, int]] = {}
+        self._vision_counts: dict[int, tuple[str, int]] = {}
 
     def _get_user_lock(self, user_id: int) -> asyncio.Lock:
         """Get or create the per-user asyncio.Lock.
@@ -399,6 +400,47 @@ class QuotaService:
             if date_str != today:
                 count = 0
             self._media_counts[user_id] = (today, count + 1)
+
+    def check_vision_quota(self, user_id: Optional[int]) -> bool:
+        """Check if user can run more chat vision analyses today.
+
+        Independent of the media-generation quota. Uses the same in-memory
+        per-user UTC-daily counter pattern. Gated by ``ENABLE_RESOURCE_QUOTA``;
+        anonymous users always pass.
+        """
+        if not settings.ENABLE_RESOURCE_QUOTA or user_id is None:
+            return True
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        with self._lock_guard:
+            date_str, count = self._vision_counts.get(user_id, (today, 0))
+            if date_str != today:
+                self._vision_counts[user_id] = (today, 0)
+                count = 0
+            if count >= settings.MAX_VISION_ANALYSES_PER_USER_PER_DAY:
+                logger.warning(
+                    "vision_quota_exceeded",
+                    user_id=user_id,
+                    daily_count=count,
+                    max_daily=settings.MAX_VISION_ANALYSES_PER_USER_PER_DAY,
+                )
+                sdlc_quota_rejections_total.labels(quota_type="vision").inc()
+                return False
+            return True
+
+    def increment_vision_usage(self, user_id: Optional[int]) -> None:
+        """Increment the user's daily chat vision-analysis counter.
+
+        Call after a successful vision analysis so the next check_vision_quota
+        reflects updated usage.
+        """
+        if user_id is None:
+            return
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        with self._lock_guard:
+            date_str, count = self._vision_counts.get(user_id, (today, 0))
+            if date_str != today:
+                count = 0
+            self._vision_counts[user_id] = (today, count + 1)
 
 
 quota_service = QuotaService()

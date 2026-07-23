@@ -58,11 +58,40 @@ def render_preview_tab() -> None:
     else:
         artifact = artifacts[0]
 
-    _render_artifact(artifact)
+    _render_artifact(artifact, client.session_token)
 
 
-def _render_artifact(artifact: dict) -> None:
-    """Render a single artifact by type."""
+def _with_token(url: str, token: str | None) -> str:
+    """Append the session token as a ``?token=`` query param for browser loads.
+
+    Browsers cannot attach an ``Authorization`` header to iframe/image/video
+    resource requests, so the workspace preview endpoint accepts the JWT via
+    the ``token`` query parameter. If no token is given or one is already
+    present, the URL is returned unchanged.
+    """
+    if not token or "token=" in url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}token={token}"
+
+
+def _auth_headers(token: str | None) -> dict:
+    """Return an ``Authorization: Bearer`` header dict, or empty if no token."""
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
+
+
+def _render_artifact(artifact: dict, token: str | None = None) -> None:
+    """Render a single artifact by type.
+
+    Args:
+        artifact: Artifact metadata dict.
+        token: Optional session JWT. It is appended to browser-loaded URLs
+            (iframe/image/video) and sent as a Bearer header for JSON/text
+            fetches so the backend's workspace preview auth accepts the
+            request. ``None`` (e.g. in pure-logic tests) skips the token.
+    """
     name = artifact.get("name", "Artifact")
     desc = artifact.get("description", "")
     art_type = artifact.get("type", "text")
@@ -80,17 +109,21 @@ def _render_artifact(artifact: dict) -> None:
         st.warning("No preview URL available for this artifact.")
         return
 
+    # Browser-loaded resources (iframe/image/video) cannot send an
+    # Authorization header, so carry the session token in the URL.
+    authed_url = _with_token(full_url, token)
+
     # Dispatch by type.
     if art_type == "html":
-        _render_html_preview(full_url)
+        _render_html_preview(authed_url)
     elif art_type == "image":
-        st.image(full_url)
+        st.image(authed_url)
     elif art_type == "video":
-        st.video(full_url)
+        st.video(authed_url)
     elif art_type == "json":
-        _render_json_preview(full_url)
+        _render_json_preview(full_url, token)
     else:
-        _render_text_preview(full_url, art_type)
+        _render_text_preview(full_url, art_type, token)
 
     # Always show the URL for manual access / debugging.
     st.caption(f"Preview URL: `{full_url}`")
@@ -110,10 +143,10 @@ def _render_html_preview(url: str) -> None:
     )
 
 
-def _render_json_preview(url: str) -> None:
+def _render_json_preview(url: str, token: str | None = None) -> None:
     """Fetch and display JSON content as a formatted tree."""
     try:
-        resp = httpx.get(url, timeout=10.0)
+        resp = httpx.get(url, headers=_auth_headers(token), timeout=10.0)
         if resp.status_code == 200:
             st.json(resp.json())
         else:
@@ -122,10 +155,10 @@ def _render_json_preview(url: str) -> None:
         st.warning(f"Failed to load JSON: {e}")
 
 
-def _render_text_preview(url: str, art_type: str) -> None:
+def _render_text_preview(url: str, art_type: str, token: str | None = None) -> None:
     """Fetch and display text content as code."""
     try:
-        resp = httpx.get(url, timeout=10.0)
+        resp = httpx.get(url, headers=_auth_headers(token), timeout=10.0)
         if resp.status_code == 200:
             lang = art_type if art_type not in ("text", "other") else "text"
             st.code(resp.text, language=lang)

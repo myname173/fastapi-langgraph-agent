@@ -3,6 +3,7 @@
 Extracted from the former ``SupervisorGraph._reviewer_node`` method.
 """
 
+from langgraph.errors import GraphInterrupt
 from langgraph.graph.state import Command
 
 from app.core.langgraph.agents.context import (
@@ -72,6 +73,8 @@ def make_reviewer_node(ctx: AgentContext) -> NodeCallable:
             # human_approval_needed and interrupts there (after the update
             # is persisted).
             return Command(update=update, goto="supervisor")
+        except GraphInterrupt:
+            raise
         except Exception as e:
             return build_error_command("reviewer", "reviewing", "reviewing", e)
 

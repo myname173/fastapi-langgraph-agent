@@ -11,5 +11,8 @@ Help the user with their questions.
 # What you know about the user
 {long_term_memory}
 
+# Visual context from user-uploaded images
+<<VISION_CONTEXT>>
+
 # Current date and time
 {current_date_and_time}

@@ -21,7 +21,7 @@ from colorama import (
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.core.config import settings
 from app.core.logging import logger
-from evals.evaluator import Evaluator
+from evals.evaluator import Evaluator, TrajectoryEvaluator
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -161,18 +161,21 @@ def display_summary(report: Dict[str, Any]) -> None:
         print(f"\n{Fore.CYAN}Report generated at:{Style.RESET_ALL} {report['generate_report_path']}")
 
 
-async def run_evaluation(generate_report: bool = True) -> None:
+async def run_evaluation(generate_report: bool = True, trajectory: bool = False) -> None:
     """Run the evaluation process.
 
     Args:
         generate_report: Whether to generate a JSON report
+        trajectory: If True, run trajectory-level LLM-as-Judge instead of
+            answer-level metrics.
     """
-    print_title("Starting Evaluation")
+    mode = "Trajectory" if trajectory else "Answer-level"
+    print_title(f"Starting Evaluation ({mode})")
     print_info(f"Using model: {settings.EVALUATION_LLM}")
     print_info(f"Report generation: {'Enabled' if generate_report else 'Disabled'}")
 
     try:
-        evaluator = Evaluator()
+        evaluator = TrajectoryEvaluator() if trajectory else Evaluator()
         await evaluator.run(generate_report_file=generate_report)
 
         print_success("Evaluation completed successfully!")
@@ -252,6 +255,11 @@ def main() -> None:
     parser.add_argument("--no-report", action="store_true", help="Don't generate a JSON report")
     parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
     parser.add_argument("--quick", action="store_true", help="Run with all default settings (no prompts)")
+    parser.add_argument(
+        "--trajectory",
+        action="store_true",
+        help="Run trajectory-level LLM-as-Judge (offline, costs LLM)",
+    )
 
     args = parser.parse_args()
 
@@ -261,7 +269,12 @@ def main() -> None:
         interactive_mode()
     else:
         # Run with command-line arguments
-        asyncio.run(run_evaluation(generate_report=not args.no_report))
+        asyncio.run(
+            run_evaluation(
+                generate_report=not args.no_report,
+                trajectory=args.trajectory,
+            )
+        )
 
 
 if __name__ == "__main__":

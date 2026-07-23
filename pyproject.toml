@@ -56,6 +56,20 @@ dev = [
     "pyinstrument>=5.1.2",
 ]
 cache = []
+# MCP (Model Context Protocol) — opt-in. Enables the MCP client
+# (langchain-mcp-adapters converts MCP tools into LangChain BaseTools) and
+# the in-repo MCP server (mcp ships FastMCP for ~100-line server authoring).
+#
+# starlette is pinned <1.0 because fastapi==0.121 uses Router(on_startup=)
+# which was removed in starlette 1.x. mcp requires starlette>=0.27, so
+# 0.52.x satisfies both constraints. The mcp_server/ container installs
+# mcp independently (its own Dockerfile, starlette 1.x is fine there since
+# no FastAPI is present). Install with: uv sync --extra mcp.
+mcp = [
+    "mcp>=1.2.0",
+    "langchain-mcp-adapters>=0.1.0",
+    "starlette>=0.27,<1.0",
+]
 
 [dependency-groups]
 dev = [
@@ -69,10 +83,17 @@ ui = ["streamlit>=1.38.0"]
 
 
 [tool.pytest.ini_options]
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "connectivity: end-to-end connectivity tests (no LLM calls)",
+    "service: service-level tests (in-process, no network)",
+    "api: HTTP endpoint tests (requires running server)",
+    "regression: trajectory-level regression gate (CI-safe, mock LLM, no network)",
+    "eval: LLM-as-Judge eval tests (opt-in, costs LLM tokens)",
+]
 python_files = ["test_*.py", "*_test.py", "tests.py"]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "test_data"]
 
 [tool.black]
 line-length = 119

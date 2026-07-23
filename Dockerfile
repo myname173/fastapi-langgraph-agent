@@ -6,7 +6,13 @@ WORKDIR /app
 # Set non-sensitive environment variables
 ARG APP_ENV=production
 
+# Optional PyPI mirror override. Empty by default (= official PyPI).
+# Pass only to bypass network issues, e.g.:
+#   docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple app
+ARG PIP_INDEX_URL=""
+
 ENV APP_ENV=${APP_ENV} \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
     PYTHONFAULTHANDLER=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONHASHSEED=random \
@@ -25,12 +31,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install locked dependencies first (cached unless pyproject.toml / uv.lock change)
 # Include test group so run_tests subprocess fallback can execute pytest.
+# Include mcp extra so ENABLE_MCP_CLIENT works without ImportError (opt-in
+# via env flag; starlette pinned <1.0 for fastapi 0.121 compatibility).
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --group test
+RUN uv sync --frozen --no-install-project --group test --extra mcp
 
 # Copy the application and install the project itself against the locked deps
 COPY . .
-RUN uv sync --frozen --group test
+RUN uv sync --frozen --group test --extra mcp
 
 # Make entrypoint script executable - do this before changing user
 RUN chmod +x /app/scripts/docker-entrypoint.sh

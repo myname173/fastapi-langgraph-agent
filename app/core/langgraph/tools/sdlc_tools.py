@@ -1097,6 +1097,11 @@ def save_output_file(
 ) -> dict:
     """Save output content to a file in the workspace outputs directory.
 
+    Unlike a raw write, this enforces the same extension whitelist
+    (``is_allowed_extension``) and size cap (``settings.SDLC_MAX_FILE_SIZE``)
+    as ``write_file`` / ``download_asset``. A blocked extension or oversized
+    payload is returned as a failed result rather than written to disk.
+
     Args:
         thread_id: The thread ID for workspace isolation
         content: Content to write to the file
@@ -1113,6 +1118,26 @@ def save_output_file(
         relative_path = f"outputs/{subdirectory}/{filename}" if subdirectory else f"outputs/{filename}"
         file_path = get_workspace_path(thread_id, relative_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not is_allowed_extension(file_path):
+            return {
+                "file_path": "",
+                "success": False,
+                "error": (
+                    f"File extension not allowed: {file_path.suffix or '(none)'}. "
+                    f"Allowed: {', '.join(sorted(settings.SDLC_ALLOWED_EXTENSIONS))}"
+                ),
+            }
+
+        if len(content.encode("utf-8")) > settings.SDLC_MAX_FILE_SIZE:
+            return {
+                "file_path": "",
+                "success": False,
+                "error": (
+                    f"Content size {len(content.encode('utf-8'))} bytes exceeds "
+                    f"limit {settings.SDLC_MAX_FILE_SIZE} bytes"
+                ),
+            }
 
         file_path.write_text(content, encoding="utf-8")
 

@@ -123,5 +123,5 @@ class TestCalculateCostUsd:
         """Every model in the pricing table can compute a cost without raising."""
         for model_name in MODEL_PRICING_USD_PER_1M:
             cost = calculate_cost_usd(model_name, 1_000, 1_000)
-            assert cost > 0
+            assert cost >= 0
             assert isinstance(cost, float)

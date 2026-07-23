@@ -235,11 +235,28 @@ class Settings:
         # approve/reject via WS). Default false — SSE endpoints remain
         # the primary interface. Enable for real-time UI integrations.
         self.ENABLE_WEBSOCKET = os.getenv("ENABLE_WEBSOCKET", "false").lower() == "true"
-        # Comma-separated list of MCP server URLs (SSE transport).
+        # Comma-separated list of MCP server URLs. All servers share the
+        # same transport (configured by MCP_DEFAULT_TRANSPORT below).
         # See .env.example for format examples.
         self.MCP_SERVER_URLS = parse_list_from_env("MCP_SERVER_URLS", [])
+        # MCP transport protocol — one of:
+        #   "streamable_http" (default, MCP 2026 production standard;
+        #     server URL form: http://host:port/mcp)
+        #   "sse" (legacy Server-Sent-Events transport, deprecated;
+        #     server URL form: http://host:port/sse)
+        #   "stdio" (local subprocess; not yet wired through this entry
+        #     point — use direct MultiServerMCPClient for stdio)
+        # All servers in MCP_SERVER_URLS use the same transport. Mixed
+        # transports require separate registry calls with explicit
+        # ``transport=`` argument.
+        self.MCP_DEFAULT_TRANSPORT = os.getenv("MCP_DEFAULT_TRANSPORT", "streamable_http").lower()
         self.MAX_LLM_CALL_RETRIES = int(os.getenv("MAX_LLM_CALL_RETRIES", "3"))
         self.LLM_TOTAL_TIMEOUT = int(os.getenv("LLM_TOTAL_TIMEOUT", "60"))
+        # Outer request-budget timeout for non-streaming /chat. Bounds the
+        # full graph.ainvoke (which may loop chat->tool->chat, making multiple
+        # LLM calls). Must be > LLM_TOTAL_TIMEOUT so the inner per-call timeout
+        # governs single calls while this bounds the aggregate.
+        self.CHAT_NONSTREAM_TIMEOUT_SEC = int(os.getenv("CHAT_NONSTREAM_TIMEOUT_SEC", "120"))
 
         # Prompt version management — maps agent_name to active version.
         # Example env value: coder:v2,planner:v1
@@ -335,6 +352,56 @@ class Settings:
         self.KB_CHUNK_OVERLAP = int(os.getenv("KB_CHUNK_OVERLAP", "50"))
         self.KB_MAX_RESULTS = int(os.getenv("KB_MAX_RESULTS", "5"))
 
+        # Real-time market quotes — chat agent's fetch_realtime_quote tool.
+        # Pulls live data from Tencent Finance (qt.gtimg.cn) on demand.
+        # Distinct from knowledge base snapshots: KB answers "what did the
+        # market look like at upload time", this answers "what is the price
+        # right now". Default true (low cost, no auth, no rate-limit issues
+        # for individual use).
+        self.ENABLE_REALTIME_QUOTES = os.getenv("ENABLE_REALTIME_QUOTES", "true").lower() == "true"
+        # Comma-separated whitelist of allowed symbol prefixes. Restricts
+        # the LLM from probing arbitrary tickers. A-share: sh/sz, HK: hk,
+        # US: us, commodity: hf_, index: 1/2/0-prefix codes.
+        self.QUOTE_ALLOWED_PREFIXES = parse_list_from_env("QUOTE_ALLOWED_PREFIXES", ["sh", "sz", "hk", "us", "hf_"])
+        # Max symbols per single tool call. Prevents the LLM from
+        # triggering 50+ HTTP requests in one go.
+        self.QUOTE_MAX_SYMBOLS_PER_CALL = int(os.getenv("QUOTE_MAX_SYMBOLS_PER_CALL", "20"))
+        # HTTP timeout per request in seconds. Tencent Finance is
+        # typically < 500ms; 8s is the same budget used in
+        # test_data/generate_market_snapshot.py.
+        self.QUOTE_HTTP_TIMEOUT_SECONDS = int(os.getenv("QUOTE_HTTP_TIMEOUT_SECONDS", "8"))
+        # Retry count for transient network errors
+        # (RemoteDisconnected, ConnectionReset).
+        self.QUOTE_HTTP_RETRIES = int(os.getenv("QUOTE_HTTP_RETRIES", "3"))
+
+        # vLLM health monitor — periodic scrape of the local vLLM
+        # Prometheus endpoint to surface OOM-risk signals
+        # (num_preemptions_total, gpu_cache_usage_perc). See
+        # app/core/vllm_health.py for details. Default on because
+        # monitoring cost is ~1 HTTP req per interval and vLLM is
+        # optional, so no failure mode is destructive.
+        self.VLLM_HEALTH_CHECK_ENABLED = os.getenv("VLLM_HEALTH_CHECK_ENABLED", "true").lower() == "true"
+        # Metrics endpoint URL. In compose the hostname is the service
+        # name; outside compose use http://host.docker.internal:8001/metrics
+        self.VLLM_METRICS_URL = os.getenv("VLLM_METRICS_URL", "http://vllm:8001/metrics")
+        # Polling interval. 30s is the same cadence as the vllm_metrics
+        # --watch loop and the docker healthcheck; cheap to run.
+        self.VLLM_HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("VLLM_HEALTH_CHECK_INTERVAL_SECONDS", "30"))
+        # Per-request timeout. The /metrics endpoint is local and
+        # lightweight; 5s is generous.
+        self.VLLM_HEALTH_CHECK_TIMEOUT_SECONDS = int(os.getenv("VLLM_HEALTH_CHECK_TIMEOUT_SECONDS", "5"))
+        # Any non-zero preemption delta triggers a WARNING event.
+        # Raise to 5+ if running stress tests to avoid log noise.
+        self.VLLM_PREEMPTION_WARN_THRESHOLD = int(os.getenv("VLLM_PREEMPTION_WARN_THRESHOLD", "1"))
+        # KV cache % above which we emit a warning. 0.85 is the
+        # threshold below which vLLM has comfortable headroom on the
+        # 4GB-VRAM single-user box.
+        self.VLLM_KV_CACHE_WARN_THRESHOLD = float(os.getenv("VLLM_KV_CACHE_WARN_THRESHOLD", "0.85"))
+        # KV cache % above which we emit an ERROR — close to OOM if a
+        # long-context request arrives. 0.95 mirrors the Grafana panel
+        # in grafana/dashboards/json/vllm_local.json.
+        self.VLLM_KV_CACHE_CRITICAL_THRESHOLD = float(os.getenv("VLLM_KV_CACHE_CRITICAL_THRESHOLD", "0.95"))
+
         self.ENABLE_KNOWLEDGE_GRAPH = os.getenv("ENABLE_KNOWLEDGE_GRAPH", "true").lower() == "true"
         self.KNOWLEDGE_GRAPH_MAX_NODES = int(os.getenv("KNOWLEDGE_GRAPH_MAX_NODES", "1000"))
         self.KNOWLEDGE_GRAPH_MAX_DEPTH = int(os.getenv("KNOWLEDGE_GRAPH_MAX_DEPTH", "5"))
@@ -350,6 +417,9 @@ class Settings:
         self.MAX_IMAGE_SIZE_MB = int(os.getenv("MAX_IMAGE_SIZE_MB", "5"))
         self.ALLOWED_IMAGE_TYPES = parse_list_from_env("ALLOWED_IMAGE_TYPES", ["png", "jpg", "jpeg", "webp"])
         self.VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o")
+        # Max tokens for a single chat vision analysis (Route B). Kept small:
+        # we only need a concise describe-only summary for chat context.
+        self.VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "1024"))
 
         # Image generation (DashScope native API, NOT OpenAI-compatible).
         # Models: wan2.6-t2i (text-to-image), wan2.6-imageedit (image edit).
@@ -374,6 +444,10 @@ class Settings:
         # from a single user exhausting it. In-memory counter, resets on
         # restart. Default 20.
         self.MAX_MEDIA_GENERATIONS_PER_USER_PER_DAY = int(os.getenv("MAX_MEDIA_GENERATIONS_PER_USER_PER_DAY", "20"))
+
+        # Chat vision analysis (Route B): daily per-user cap for image analysis
+        # in chat, independent of the SDLC media-generation quota above.
+        self.MAX_VISION_ANALYSES_PER_USER_PER_DAY = int(os.getenv("MAX_VISION_ANALYSES_PER_USER_PER_DAY", "30"))
 
         # Resource Quota Configuration
         self.ENABLE_RESOURCE_QUOTA = os.getenv("ENABLE_RESOURCE_QUOTA", "true").lower() == "true"

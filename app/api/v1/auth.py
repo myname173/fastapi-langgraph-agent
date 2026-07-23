@@ -5,7 +5,7 @@ and token verification.
 """
 
 import uuid
-from typing import List
+from typing import List, Optional
 
 from fastapi import (
     APIRouter,
@@ -45,12 +45,12 @@ from app.utils.sanitization import (
 )
 
 router = APIRouter()
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 db_service = DatabaseService()
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> User:
     """Get the current user ID from the token.
 
@@ -63,6 +63,12 @@ async def get_current_user(
     Raises:
         HTTPException: If the token is invalid or missing.
     """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         # Sanitize token
         token = sanitize_string(credentials.credentials)
@@ -101,7 +107,7 @@ async def get_current_user(
 
 
 async def get_current_session(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Session:
     """Get the current session ID from the token.
 
@@ -114,6 +120,12 @@ async def get_current_session(
     Raises:
         HTTPException: If the token is invalid or missing.
     """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         # Sanitize token
         token = sanitize_string(credentials.credentials)

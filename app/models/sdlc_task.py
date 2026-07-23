@@ -34,6 +34,13 @@ class SDLCTask(SQLModel, table=True):
         completed_at: When the task was completed (optional)
     """
 
+    # NOTE: explicit __tablename__ is REQUIRED because the alembic migration
+    # ``a3f7c92e1b4d_add_sdlc_task_and_approval_log.py`` created the table
+    # with the name ``sdlc_task`` (with underscore). Without this, SQLModel
+    # derives ``sdlctask`` from the class name and queries against a
+    # non-existent relation, returning HTTP 500.
+    __tablename__ = "sdlc_task"
+
     id: str = Field(primary_key=True)
     thread_id: str = Field(index=True)
     user_id: Optional[int] = Field(default=None)

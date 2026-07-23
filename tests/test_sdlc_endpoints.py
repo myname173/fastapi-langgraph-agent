@@ -13,11 +13,11 @@ from unittest.mock import AsyncMock, patch
 
 
 class TestRootEndpoint:
-    """Tests for GET /."""
+    """Tests for GET /api/info."""
 
     async def test_root_returns_project_info(self, async_client):
         """Root endpoint returns name, version, and status."""
-        response = await async_client.get("/")
+        response = await async_client.get("/api/info")
 
         assert response.status_code == 200
         data = response.json()
@@ -28,7 +28,7 @@ class TestRootEndpoint:
 
     async def test_root_has_environment_field(self, async_client):
         """Root response includes the current environment."""
-        response = await async_client.get("/")
+        response = await async_client.get("/api/info")
         data = response.json()
         assert "environment" in data
         # Tests run with APP_ENV=test → Environment.TEST

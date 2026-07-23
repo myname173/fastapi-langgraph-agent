@@ -53,6 +53,8 @@ jobs:
   # -----------------------------------------------------------------
   # 3. 单元测试 — pytest（排除 slow 标记的慢测试）
   #    测试全 mock 化（见 conftest.py），无需 DB/外部服务
+  #    含 trajectory regression gate（tests/test_eval_regression.py，
+  #    @pytest.mark.regression，零 LLM 成本，对 8 条 golden 任务断言）
   # -----------------------------------------------------------------
   test:
     name: Tests (pytest)

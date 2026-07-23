@@ -295,6 +295,55 @@
           "format": "s"
         }
       ]
+    },
+    {
+      "type": "stat",
+      "title": "MCP Tool Calls (Total)",
+      "targets": [
+        {
+          "expr": "sum(mcp_tool_calls_total)",
+          "refId": "A"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 51,
+        "w": 12,
+        "h": 3
+      },
+      "stat": {
+        "valueMode": "current"
+      }
+    },
+    {
+      "type": "graph",
+      "title": "MCP Tool Calls Rate by Tool/Status",
+      "targets": [
+        {
+          "expr": "sum(rate(mcp_tool_calls_total{status=\"success\"}[1m])) by (tool)",
+          "legendFormat": "{{tool}} ✅",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(mcp_tool_calls_total{status=\"failed\"}[1m])) by (tool)",
+          "legendFormat": "{{tool}} ❌",
+          "refId": "B"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 54,
+        "w": 24,
+        "h": 9
+      },
+      "yAxes": [
+        {
+          "label": "Calls/min",
+          "format": "none"
+        }
+      ]
     }
   ],
   "templating": {

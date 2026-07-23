@@ -13,6 +13,7 @@ class GraphState(TypedDict):
 
     messages: Annotated[list, add_messages]
     long_term_memory: str
+    vision_context: str
 
 
 class SDLCState(TypedDict):

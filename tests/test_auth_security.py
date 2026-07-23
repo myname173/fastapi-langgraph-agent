@@ -4,9 +4,9 @@ Covers:
 - Forged JWT (signed with a different secret) → 401
 - Expired JWT → 401
 - Malformed token (not 3-segment JWT format) → 422
-- Empty Authorization header → 403
-- Missing Authorization header → 403
-- Bearer with empty token → 403 / 422
+- Empty Authorization header → 401
+- Missing Authorization header → 401
+- Bearer with empty token → 401 / 422
 - Tampered payload (valid format, altered sub) → 401
 """
 
@@ -94,11 +94,11 @@ class TestMalformedToken:
         # verify_token raises ValueError for bad format → 422
         assert response.status_code in (401, 422)
 
-    async def test_empty_token_returns_403(self, async_client, mock_db):
-        """An empty Bearer token returns 403 (HTTPBearer rejects empty)."""
+    async def test_empty_token_returns_401(self, async_client, mock_db):
+        """An empty Bearer token returns 401 (auto_error=False, manual check)."""
         headers = {"Authorization": "Bearer "}
         response = await async_client.get("/api/v1/auth/sessions", headers=headers)
-        assert response.status_code == 403
+        assert response.status_code == 401
 
     async def test_two_segment_token_returns_422(self, async_client, mock_db):
         """A JWT with only 2 segments is rejected."""
@@ -116,16 +116,16 @@ class TestMalformedToken:
 class TestMissingAuth:
     """Tests for missing authentication."""
 
-    async def test_no_authorization_header_returns_403(self, async_client, mock_db):
-        """Missing Authorization header returns 403 (HTTPBearer default)."""
+    async def test_no_authorization_header_returns_401(self, async_client, mock_db):
+        """Missing Authorization header returns 401 (auto_error=False, manual check)."""
         response = await async_client.get("/api/v1/auth/sessions")
-        assert response.status_code == 403
+        assert response.status_code == 401
 
-    async def test_wrong_scheme_returns_403(self, async_client, mock_db):
-        """Non-Bearer scheme returns 403."""
+    async def test_wrong_scheme_returns_401(self, async_client, mock_db):
+        """Non-Bearer scheme returns 401 (auto_error=False, manual check)."""
         headers = {"Authorization": f"Basic {_make_token('1')}"}
         response = await async_client.get("/api/v1/auth/sessions", headers=headers)
-        assert response.status_code == 403
+        assert response.status_code == 401
 
 
 class TestSessionIsolation:

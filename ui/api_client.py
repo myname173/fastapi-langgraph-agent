@@ -85,6 +85,17 @@ class SDLCAPIClient:
         """Return the current session ID, if any."""
         return self._session_id
 
+    @property
+    def session_token(self) -> Optional[str]:
+        """Return the active session JWT.
+
+        Used to authorize workspace preview requests: the backend serves
+        workspace artifacts only to the owner of the ``thread_id``, so the
+        token is appended to iframe/image/video URLs or sent as a Bearer
+        header for JSON/text fetches.
+        """
+        return self._session_token
+
     def _headers(self) -> Dict[str, str]:
         token = self._session_token or self._access_token
         if token:

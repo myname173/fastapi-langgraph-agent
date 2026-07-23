@@ -162,6 +162,18 @@ sdlc_quota_rejections_total = Counter(
     ["quota_type"],  # quota_type: workspace / images / tasks
 )
 
+# SDLC MCP (Model Context Protocol) tool invocation metrics.
+# Incremented by coder_node and tester_node around each MCP tool call.
+# Labels:
+#   tool   — MCP tool name with "mcp_" prefix (e.g. "mcp_git_log",
+#            "mcp_query_tasks"). Lets dashboards break down by tool.
+#   status — "success" | "failed". Maps to whether ainvoke raised.
+mcp_tool_calls_total = Counter(
+    "mcp_tool_calls_total",
+    "Total MCP tool invocations by coder/tester agents",
+    ["tool", "status"],
+)
+
 
 def setup_metrics(app):
     """Set up Prometheus metrics middleware and endpoints.

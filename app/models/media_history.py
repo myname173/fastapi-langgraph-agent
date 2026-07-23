@@ -47,6 +47,12 @@ class MediaHistory(SQLModel, table=True):
         created_at: When the generation completed.
     """
 
+    # NOTE: explicit __tablename__ is REQUIRED because the alembic migration
+    # created the table as ``media_history`` (with underscore). Without this,
+    # SQLModel derives ``mediahistory`` from the class name and queries
+    # against a non-existent relation, returning HTTP 500.
+    __tablename__ = "media_history"
+
     id: str = Field(primary_key=True)
     user_id: Optional[int] = Field(default=None, index=True)
     media_type: MediaType = Field(default=MediaType.IMAGE)

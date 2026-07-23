@@ -1,12 +1,18 @@
 """Tests for image_service: caching, validation, and cleanup."""
 
+import base64
 import io
+import os
+import tempfile
 import time
+from pathlib import Path
+
 import pytest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from PIL import Image
 
+from app.schemas.chat import InvestmentImageAnalysis
 from app.services.image_service import ImageService
 
 
@@ -117,3 +123,73 @@ class TestImageValidation:
         service._max_size_bytes = 10
         is_valid, error = service._validate_image(create_minimal_png())
         assert is_valid is False
+
+
+class TestInvestmentVisionTempNamespace:
+    """Chat vision must use an ephemeral namespace that is cleaned up (P2 fix).
+
+    Previously chat uploads were namespaced under the session id, so they
+    accumulated in the session workspace and exhausted ``MAX_IMAGES_PER_TASK``
+    over a long conversation, silently dropping later images. They are now
+    stored under a throwaway per-request namespace and deleted after analysis.
+    """
+
+    @pytest.fixture
+    def service(self, enable_multimodal):
+        return ImageService()
+
+    async def _run(self, service, temp: bool) -> tuple[list, list]:
+        """Drive analyze_investment_image with a real readable PNG.
+
+        Returns the recorded (saved_task_ids, cleaned_task_ids) so the test
+        can assert which namespace was used and whether cleanup happened.
+        """
+        png = create_minimal_png()
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.write(png)
+        tmp.close()
+        fake_path = Path(tmp.name)
+
+        saved: list = []
+        cleaned: list = []
+
+        async def fake_save(image_bytes, task_id):
+            saved.append(task_id)
+            return "img-1"
+
+        async def fake_cleanup(task_id):
+            cleaned.append(task_id)
+            return 1
+
+        analysis = InvestmentImageAnalysis(image_id="img-1", description="desc", key_elements=[])
+        with (
+            patch.object(service, "save_uploaded_image", side_effect=fake_save),
+            patch.object(service, "cleanup_task_images", side_effect=fake_cleanup),
+            patch.object(service, "get_image_path", return_value=fake_path),
+            patch("app.services.image_service.LLMRegistry") as reg,
+            patch("app.services.image_service.llm_service") as llm,
+        ):
+            reg.ensure_model.return_value = None
+            llm.call = AsyncMock(return_value=analysis)
+            data_url = "data:image/png;base64," + base64.b64encode(png).decode()
+            result = await service.analyze_investment_image(data_url, task_id="sess-9", user_id=7, temp=temp)
+
+        os.unlink(tmp.name)
+        assert result is analysis
+        return saved, cleaned
+
+    @pytest.mark.asyncio
+    async def test_temp_namespace_used_and_cleaned(self, service):
+        """temp=True stores under chat-tmp-* and cleans it up afterwards."""
+        saved, cleaned = await self._run(service, temp=True)
+        assert len(saved) == 1
+        assert saved[0].startswith("chat-tmp-")
+        assert len(cleaned) == 1
+        assert cleaned[0] == saved[0]
+
+    @pytest.mark.asyncio
+    async def test_non_temp_keeps_task_id(self, service):
+        """Without temp=True the supplied task_id is used and nothing is cleaned."""
+        saved, cleaned = await self._run(service, temp=False)
+        assert saved[0] == "sess-9"
+        assert cleaned == []

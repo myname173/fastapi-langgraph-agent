@@ -24,3 +24,12 @@ test_data/
 
 # Reports
 evals/reports/
+
+# IDE workspace config
+.trae/
+
+# Runtime logs
+logs/
+
+# Local test sqlite artifacts (seed db is generated at runtime by mcp_server/seed_db.py)
+*.db

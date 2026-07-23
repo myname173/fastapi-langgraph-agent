@@ -123,8 +123,12 @@ services:
       - monitoring
     restart: always
 
-  # Streamlit Web UI — depends on the API service being healthy
+  # Streamlit Web UI — depends on the API service being healthy.
+  # Deprecated as default entry: the zero-build static SPA (frontend/, served by
+  # the app container at /) is now the primary web UI. Streamlit is kept as an
+  # opt-in fallback — start with: docker compose --profile streamlit up ui
   ui:
+    profiles: ["streamlit"]
     build:
       context: .
       dockerfile: Dockerfile.ui
@@ -148,11 +152,15 @@ services:
     networks:
       - monitoring
 
-  # Local vLLM inference service — Qwen2.5-0.5B-Instruct on GTX 1650 Ti.
-  # Used only by session_naming (lightweight role) via LLM_PROVIDER_OVERRIDES.
-  # app does NOT hard-depend on vllm — if it fails, LLMService falls back
-  # to cloud DashScope models automatically. To disable local inference,
-  # comment out this service and update LLM_PROVIDER_OVERRIDES in .env.
+  # Local vLLM inference service — Qwen2.5-1.5B-Instruct-GPTQ-Int4 (Phase B).
+  # Phase B: upgraded from 0.5B FP16 to 1.5B GPTQ-Int4 (gptq_marlin kernel)
+  # for stronger reasoning while staying within GTX 1650 Ti 4GB VRAM.
+  # Note: vLLM serves ONE model at a time. We expose it under BOTH names
+  # (local-qwen-1.5b AND local-qwen-0.5b) so that the existing
+  # LLM_MODELS fallback chain in .env keeps resolving to local vLLM
+  # (no automatic fallback to cloud during the Phase B cutover).
+  # When Step 2 swaps LLM_MODELS order to put local-qwen-1.5b first,
+  # this dual-name serving continues to work transparently.
   vllm:
     image: vllm/vllm-openai:v0.8.5
     init: true  # tini init process — reaps zombie children (fixes docker stop hang)
@@ -169,26 +177,90 @@ services:
             - capabilities: [gpu]
     command:
       - --model
-      - /models/Qwen2.5-0.5B-Instruct
+      - /models/Qwen2.5-1.5B-Instruct-GPTQ-Int4
+      # Phase B: dual-name serving — `local-qwen-0.5b` is the legacy
+      # name still referenced by LLM_MODELS in .env; `local-qwen-1.5b`
+      # will be promoted to primary in Step 2.
       - --served-model-name
+      - local-qwen-1.5b
       - local-qwen-0.5b
+      # vLLM 0.8.5 quirk: when config.json has use_exllama=true +
+      # exllama_config.version=1, vLLM's ModelConfig normalizes the
+      # internal quantization field to 'gptq_marlin' (its preferred
+      # kernel) but then strict-validates against the literal
+      # quant_method='gptq' in config.json and raises ValueError.
+      # Passing --quantization gptq explicitly forces the exllama v1
+      # code path which matches config.json's quant_method.
+      - --quantization
+      - gptq
       - --gpu-memory-utilization
       - "0.88"
       - --max-model-len
-      - "4096"
+      - "1536"              # Phase B: 2048→1536 (1.5B GPTQ KV cache larger)
       - --max-num-seqs
-      - "4"
-      - --enforce-eager
+      - "2"                 # single-user
+      - --enforce-eager       # GTX 1650 Ti compatibility
       - --dtype
       - half
       - --port
       - "8001"
+      - --enable-prefix-caching    # vLLM 0.8 default, declared explicitly
+      - --enable-chunked-prefill   # works with prefix cache
+      - --block-size
+      - "16"                       # explicit default for future tuning
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s  # model loading takes ~30-60s on GTX 1650 Ti
+      start_period: 90s  # Phase B: 60→90 (1.5B GPTQ model load is slower than 0.5B FP16)
+    restart: on-failure
+    networks:
+      - monitoring
+
+  # ===================================================================
+  # MCP Server — read-only git context + sqlite query sidecar
+  # -------------------------------------------------------------------
+  # CPU-only service (zero GPU cost). Gives coder/tester agents git
+  # introspection (log/show/branch/status/diff) and read-only SDLC task
+  # history queries via the Model Context Protocol.
+  #
+  # Safety: workspace is mounted read-only (":ro") so the MCP server
+  # physically cannot mutate the repo. The sqlite connection is opened
+  # with mode=ro at the sqlite level. No write tools are exposed.
+  #
+  # Opt-in: set ENABLE_MCP_CLIENT=true + MCP_SERVER_URLS in .env to make
+  # the app load tools from this server on startup. If this container is
+  # down, the app degrades gracefully (non-fatal skip, cloud fallback).
+  # ===================================================================
+  mcp:
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      # Read-only workspace mount — git tools can observe but never mutate.
+      # If ./workspace doesn't exist on host, docker creates an empty dir;
+      # git tools return a friendly "not a git repository" error at call time.
+      - ./workspace:/workspace:ro
+      # Persistent sqlite storage (seed data survives restarts).
+      - mcp_data:/data
+    environment:
+      - MCP_TRANSPORT=streamable-http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8002
+      - MCP_WORKSPACE_ROOT=/workspace
+      - MCP_DB_PATH=/data/mcp.db
+    healthcheck:
+      # mcp_server/Dockerfile is python:3.13-slim (no curl). Use a
+      # socket probe — the streamable-http endpoint accepts POST only,
+      # so a GET-based check would return 405 and false-negative.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8002), timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: on-failure
     networks:
       - monitoring
@@ -231,6 +303,7 @@ volumes:
   grafana-storage:
   postgres-data:
   valkey-data:
+  mcp_data:
 
 # Docker secrets — file-based credential injection (read-only in container).
 # The source file on the host is gitignored (see secrets/.gitignore).

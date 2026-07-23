@@ -29,6 +29,34 @@ _kb_breaker = CircuitBreaker(
 )
 
 
+class EmbeddingModelMismatchError(Exception):
+    """Raised when stored KB vectors use a different embedding model.
+
+    Mixing vector spaces silently corrupts semantic search (every query hits
+    only the vectors that happen to share the query's space). We surface this
+    loudly instead of returning silently-wrong results.
+    """
+
+
+def _kb_pg_connection():
+    """Open a short-lived psycopg connection to the KB's pgvector store.
+
+    The knowledge base uses mem0's own pgvector table (separate from the app's
+    async DB pool), so we connect directly for metadata probes like the
+    embedding-model consistency check.
+    """
+    import psycopg
+
+    return psycopg.connect(
+        host=settings.POSTGRES_HOST,
+        dbname=settings.POSTGRES_DB,
+        user=settings.POSTGRES_USER,
+        password=settings.POSTGRES_PASSWORD,
+        port=settings.POSTGRES_PORT,
+        connect_timeout=5,
+    )
+
+
 class KnowledgeBaseService:
     """Service for indexing and searching user-uploaded documents.
 
@@ -62,18 +90,86 @@ class KnowledgeBaseService:
                     },
                     "llm": {
                         "provider": "openai",
-                        "config": {"model": settings.LONG_TERM_MEMORY_MODEL},
+                        "config": {
+                            "model": settings.LONG_TERM_MEMORY_MODEL,
+                            "api_key": settings.OPENAI_API_KEY,
+                            "openai_base_url": settings.OPENAI_BASE_URL,
+                        },
                     },
                     "embedder": {
                         "provider": "openai",
                         "config": {
                             "model": settings.LONG_TERM_MEMORY_EMBEDDER_MODEL,
                             "embedding_dims": settings.LONG_TERM_MEMORY_EMBEDDING_DIM,
+                            "api_key": settings.OPENAI_API_KEY,
+                            "openai_base_url": settings.OPENAI_BASE_URL,
                         },
                     },
                 }
             )
         return self._memory
+
+    async def _stored_embedding_models(self, user_id: str) -> set:
+        """Return the distinct embedding models recorded for a user's chunks.
+
+        Chunks indexed after this fix carry ``payload.embedding_model``; older
+        chunks (backfilled at deploy) carry the same field. ``NULL``/absent
+        values are ignored so legacy rows don't trigger false mismatches.
+        """
+        conn = _kb_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT payload->>'embedding_model' "
+                    "FROM knowledge_base "
+                    "WHERE payload->>'user_id' = %s "
+                    "AND payload->>'embedding_model' IS NOT NULL",
+                    (user_id,),
+                )
+                return {row[0] for row in cur.fetchall() if row[0]}
+        finally:
+            conn.close()
+
+    async def _assert_embedding_consistent(self, user_id: str) -> None:
+        """Fail fast on embedding-model mismatch before searching.
+
+        Prevents the silent retrieval corruption that occurs after an embedding
+        model switch. Raises :class:`EmbeddingModelMismatchError`.
+        """
+        current = settings.LONG_TERM_MEMORY_EMBEDDER_MODEL
+        stored = await self._stored_embedding_models(user_id)
+        if stored and stored != {current}:
+            raise EmbeddingModelMismatchError(
+                f"Knowledge base embedding model mismatch for user {user_id}: "
+                f"stored={sorted(stored)}, current config={current}. "
+                f"Re-embed the knowledge base before searching."
+            )
+
+    async def validate_embedding_consistency(self) -> List[str]:
+        """Startup check across all users.
+
+        Returns human-readable mismatch descriptions (empty when consistent).
+        Non-fatal: it only reports, so a mismatch doesn't block startup.
+        """
+        current = settings.LONG_TERM_MEMORY_EMBEDDER_MODEL
+        conn = _kb_pg_connection()
+        problems: List[str] = []
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT payload->>'user_id', payload->>'embedding_model' "
+                    "FROM knowledge_base "
+                    "WHERE payload->>'embedding_model' IS NOT NULL"
+                )
+                by_user: Dict[str, set] = {}
+                for uid, model in cur.fetchall():
+                    by_user.setdefault(uid or "?", set()).add(model)
+        finally:
+            conn.close()
+        for uid, models in by_user.items():
+            if models and models != {current}:
+                problems.append(f"user {uid}: stored embedding models {sorted(models)} != current config {current}")
+        return problems
 
     def _extract_text(self, content: bytes, filename: str) -> str:
         """Extract text content from a uploaded file.
@@ -232,11 +328,22 @@ class KnowledgeBaseService:
             merged_metadata = {
                 **chunk_data["metadata"],
                 "hash": content_hash,
+                # Plan A: stamp the embedding model used for this chunk's vector
+                # so a future model switch can be detected (see
+                # _assert_embedding_consistent). Must match the embedder model.
+                "embedding_model": settings.LONG_TERM_MEMORY_EMBEDDER_MODEL,
             }
             await memory.add(
                 [{"role": "user", "content": chunk_data["content"]}],
                 user_id=user_id_str,
                 metadata=merged_metadata,
+                # infer=False bypasses mem0's LLM-based extraction and
+                # deduplication. For knowledge-base documents, we store the
+                # original content as-is, not LLM-summarized "memories". With
+                # infer=True (default), similar documents (e.g., P/E and P/B
+                # ratio) get deduplicated, causing data loss. infer=False
+                # stores raw chunks without LLM processing.
+                infer=False,
             )
 
         logger.info(
@@ -269,10 +376,19 @@ class KnowledgeBaseService:
         if not settings.ENABLE_KNOWLEDGE_BASE:
             return []
 
+        # Empty/whitespace queries can't be embedded meaningfully; return no
+        # results instead of hitting the embedder / vector store.
+        if not query or not query.strip():
+            return []
+
         # M-16 fix: short-circuit when pgvector is persistently down.
         if _kb_breaker.is_open:
             logger.debug("kb_search_short_circuited", user_id=user_id)
             return []
+
+        # Plan A: fail fast on embedding-model mismatch so we never return
+        # silently-wrong results after a model switch.
+        await self._assert_embedding_consistent(user_id)
 
         max_results = limit or settings.KB_MAX_RESULTS
         try:
@@ -329,7 +445,9 @@ class KnowledgeBaseService:
 
         try:
             memory = await self._get_memory()
-            all_memories = await memory.get_all(user_id=user_id)
+            # Same limit fix as list_documents: default limit=100 truncates
+            # the chunk set, leaving stale chunks behind after delete.
+            all_memories = await memory.get_all(user_id=user_id, limit=10000)
             memories = all_memories.get("results", []) if isinstance(all_memories, dict) else []
 
             deleted_count = 0
@@ -376,7 +494,11 @@ class KnowledgeBaseService:
 
         try:
             memory = await self._get_memory()
-            all_memories = await memory.get_all(user_id=user_id)
+            # mem0's AsyncMemory.get_all has a default limit=100; with
+            # 130+ chunks stored, the trailing documents (e.g. all Phase
+            # 4 market snapshots) were silently dropped from the response.
+            # Pass a high upper bound to enumerate every chunk.
+            all_memories = await memory.get_all(user_id=user_id, limit=10000)
             memories = all_memories.get("results", []) if isinstance(all_memories, dict) else []
 
             docs: Dict[str, dict] = {}

@@ -2,19 +2,23 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
+import mimetypes
 
 from dotenv import load_dotenv
 from fastapi import (
     FastAPI,
+    HTTPException,
     Request,
     status,
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from asgi_correlation_id import CorrelationIdMiddleware
 
@@ -22,6 +26,7 @@ from app.api.v1.api import api_router
 from app.api.v1.chatbot import agent
 from app.core.cache import cache_service
 from app.core.config import settings
+from app.utils.auth import verify_token
 from app.core.db.pool import (
     close_pool,
     init_pool,
@@ -40,6 +45,7 @@ from app.core.middleware import (
 )
 from app.core.observability import langfuse_init
 from app.core.task_manager import task_manager
+from app.core.vllm_health import vllm_health_monitor
 from app.services.database import database_service
 from app.services.memory import memory_service
 
@@ -114,17 +120,53 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.exception("mcp_client_init_failed", error=str(e))
 
+    # Knowledge base embedding-model consistency check (Plan A). Non-fatal:
+    # if stored vectors use a different embedding model than the current
+    # config, log an ERROR so on-call is alerted rather than discovering
+    # silently-wrong search results in production.
+    if settings.ENABLE_KNOWLEDGE_BASE:
+        try:
+            from app.services.knowledge_base_service import knowledge_base_service
+
+            problems = await knowledge_base_service.validate_embedding_consistency()
+            if problems:
+                for p in problems:
+                    logger.error("kb_embedding_model_mismatch", detail=p)
+            else:
+                logger.info("kb_embedding_consistency_ok")
+        except Exception as e:
+            logger.exception("kb_embedding_consistency_check_failed", error=str(e))
+
+    # vLLM local service health monitor — periodic scrape of the
+    # vLLM /metrics endpoint that emits structured WARNING/ERROR
+    # events when num_preemptions_total or gpu_cache_usage_perc cross
+    # configured thresholds. Opt-out via VLLM_HEALTH_CHECK_ENABLED=false.
+    # See app/core/vllm_health.py for the signal rationale.
+    if settings.VLLM_HEALTH_CHECK_ENABLED:
+        try:
+            await vllm_health_monitor.start()
+        except Exception as e:
+            logger.exception("vllm_health_monitor_start_failed", error=str(e))
+
     yield
 
     # Cleanup on shutdown — order matters:
-    # 1. Stop accepting new background work (drain tracked tasks)
+    # 1. Stop the vLLM health monitor first so it can emit its final
+    #    log line and remove its task from the task_manager registry
+    #    before the bulk shutdown below.
+    if settings.VLLM_HEALTH_CHECK_ENABLED:
+        await vllm_health_monitor.stop()
+    # 2. Stop accepting new background work (drain tracked tasks).
+    #    task_manager.cancel() is a no-op on already-done tasks, so
+    #    the monitor's task finishes cleanly even though it lives in
+    #    the same registry.
     await task_manager.shutdown()
-    # 2. Close cache connections
+    # 3. Close cache connections
     await cache_service.close()
-    # 3. Dispose the async SQLAlchemy engine (business DB layer)
+    # 4. Dispose the async SQLAlchemy engine (business DB layer)
     if settings.ENABLE_ASYNC_DB:
         await close_async_engine()
-    # 4. Close the shared async connection pool (LangGraph + business DB)
+    # 5. Close the shared async connection pool (LangGraph + business DB)
     await close_pool()
     logger.info("application_shutdown")
 
@@ -202,18 +244,107 @@ app.add_middleware(
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
-# Mount workspace as static files for artifact preview (HTML/games/dashboards).
-# Gated by ENABLE_WORKSPACE_PREVIEW flag — when off, the mount and the asset
-# tools (app/core/langgraph/tools/asset_tools.py) are both disabled, keeping
-# pure-backend tasks unaffected. The mount is read-only; writes still go
-# through write_file / download_asset with path traversal + extension checks.
-if settings.ENABLE_WORKSPACE_PREVIEW:
-    settings.SDLC_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
-    app.mount(
-        settings.WORKSPACE_PREVIEW_URL_PREFIX,
-        StaticFiles(directory=settings.SDLC_WORKSPACE_ROOT),
-        name="workspace",
+
+# Serve workspace artifacts (HTML/games/dashboards) for the UI's sandboxed
+# iframe. Gated by ENABLE_WORKSPACE_PREVIEW so pure-backend tasks are
+# unaffected: when the flag is off the endpoint returns 404 without touching
+# the filesystem. Unlike a raw StaticFiles mount, every request must present a
+# valid JWT (session or user token) via the ``?token=`` query param or the
+# ``Authorization`` header, and the authenticated identity must own the
+# requested ``thread_id``:
+#   * session token -> ``sub`` (session id) must equal ``thread_id``
+#   * user token    -> the user must own the session whose id == ``thread_id``
+# This closes the info-leak gap where anyone who knew a ``thread_id`` could
+# read another user's artifacts. Writes still go through write_file /
+# download_asset with path traversal + extension checks.
+@app.get(f"{settings.WORKSPACE_PREVIEW_URL_PREFIX}/{{path:path}}")
+async def serve_workspace_file(path: str, request: Request):
+    """Serve a workspace artifact with session/owner authorization.
+
+    Args:
+        path: URL tail of the form ``<thread_id>/<relative_path>``.
+        request: Incoming request (used for token + headers).
+
+    Returns:
+        FileResponse for the requested artifact.
+
+    Raises:
+        HTTPException: 401/403/404 for missing auth, no ownership, or
+            missing/disallowed files.
+    """
+    from app.core.langgraph.tools.sdlc_tools import (
+        get_workspace_path,
+        is_allowed_extension,
     )
+
+    if not settings.ENABLE_WORKSPACE_PREVIEW:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    thread_id = segments[0]
+    relative = "/".join(segments[1:]) or "index.html"
+
+    token = request.query_params.get("token")
+    auth_header = request.headers.get("Authorization")
+    if not token and auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # verify_token raises ValueError for malformed tokens; treat that as
+    # an invalid token (401) rather than a 500.
+    try:
+        principal = verify_token(token, expected_type="session")
+    except ValueError:
+        principal = None
+    token_type = "session"
+    if principal is None:
+        try:
+            principal = verify_token(token, expected_type="user")
+        except ValueError:
+            principal = None
+        token_type = "user"
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if token_type == "session":
+        if principal != thread_id:
+            logger.warning("workspace_preview_forbidden", thread_id=thread_id, principal=principal)
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    else:
+        session = await database_service.get_session(thread_id)
+        if session is None or str(session.user_id) != str(principal):
+            logger.warning("workspace_preview_forbidden", thread_id=thread_id, principal=principal)
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    try:
+        abs_path = get_workspace_path(thread_id, relative)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid path")
+
+    if not abs_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    if not is_allowed_extension(abs_path):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="File type not allowed")
+
+    media_type, _ = mimetypes.guess_type(str(abs_path))
+    return FileResponse(abs_path, media_type=media_type or "application/octet-stream")
+
+
+if settings.ENABLE_WORKSPACE_PREVIEW:
     logger.info(
         "workspace_preview_mounted",
         prefix=settings.WORKSPACE_PREVIEW_URL_PREFIX,
@@ -221,10 +352,10 @@ if settings.ENABLE_WORKSPACE_PREVIEW:
     )
 
 
-@app.get("/")
+@app.get("/api/info")
 @limiter.limit(settings.RATE_LIMIT_ENDPOINTS["root"][0])
 async def root(request: Request):
-    """Root endpoint returning basic API information."""
+    """API info endpoint (relocated from "/" to make room for the SPA root)."""
     logger.info("root_endpoint_called")
     return {
         "name": settings.PROJECT_NAME,
@@ -262,3 +393,50 @@ async def health_check(request: Request) -> JSONResponse:
     status_code = status.HTTP_200_OK if db_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
 
     return JSONResponse(content=response, status_code=status_code)
+
+
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles that falls back to index.html for unknown non-API paths.
+
+    Enables HTML5 history-API routing (GET /investor -> index.html) while
+    keeping API/docs/health/workspace paths returning a real 404.
+
+    NOTE: do NOT add a frontend/404.html — with html=True, Starlette would
+    serve it as a 404 response (not raise), bypassing this fallback. If a
+    404.html is ever needed, switch to a response-status-code check.
+    """
+
+    _NO_FALLBACK = ("/api/", "/docs", "/redoc", "/openapi.json", "/health", "/workspace")
+
+    async def get_response(self, path: str, scope):
+        """Serve the file, falling back to index.html on 404 for non-API paths.
+
+        Args:
+            path: File path relative to the static root (no leading slash).
+            scope: The ASGI scope; ``scope["path"]`` holds the full URL path
+                used to decide whether the 404 should fall back.
+        """
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as ex:
+            if ex.status_code != 404:
+                raise
+            full = scope.get("path", "") or "/"
+            if full.startswith(self._NO_FALLBACK):
+                raise
+            return await super().get_response("index.html", scope)
+
+
+# Mount the zero-build static SPA as the catch-all root. Registered LAST so all
+# explicit routes (/api/v1/*, /docs, /redoc, /openapi.json, /health, /api/info,
+# /workspace_preview/*) take precedence (Starlette matches routes before mounts).
+# ``html=True`` makes ``/`` serve ``index.html``; SPAStaticFiles falls back to
+# index.html for unknown non-API paths so history-API routes (/investor, /coder)
+# work on refresh. Guarded so pure-backend deploys without a ``frontend/``
+# directory do not crash on startup.
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+if _FRONTEND_DIR.is_dir():
+    app.mount("/", SPAStaticFiles(directory=str(_FRONTEND_DIR), html=True), name="spa")
+    logger.info("spa_mounted", root=str(_FRONTEND_DIR))
+else:
+    logger.info("spa_frontend_missing_skipped")

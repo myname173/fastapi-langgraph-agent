@@ -18,7 +18,10 @@ from app.core.config import settings
 from app.core.limiter import limiter
 from app.core.logging import logger
 from app.models.user import User
-from app.services.knowledge_base_service import knowledge_base_service
+from app.services.knowledge_base_service import (
+    knowledge_base_service,
+    EmbeddingModelMismatchError,
+)
 from app.utils.errors import safe_500
 from app.utils.sanitization import sanitize_string
 
@@ -253,6 +256,12 @@ async def search_knowledge_base(
 
     except HTTPException:
         raise
+    except EmbeddingModelMismatchError as e:
+        # Plan A: stored vectors use a different embedding model than the
+        # current config — searching would return silently-wrong results.
+        # Surface a clear, actionable 409 instead of degrading silently.
+        logger.error("kb_search_embedding_mismatch", user_id=user.id, error=str(e))
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logger.exception("kb_search_failed", user_id=user.id, error=str(e))
         raise safe_500(e, context="kb_search")

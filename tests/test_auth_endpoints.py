@@ -14,7 +14,7 @@ network I/O occurs.
 """
 
 
-def _make_token(thread_id: str) -> str:
+def _make_token(thread_id: str, token_type: str = "session") -> str:
     """Build a JWT token for tests (deferred import avoids circular import).
 
     ``app.utils.auth`` triggers ``app.utils.__init__`` → ``app.utils.graph``
@@ -24,7 +24,7 @@ def _make_token(thread_id: str) -> str:
     """
     from app.utils.auth import create_access_token as _cat
 
-    return _cat(thread_id).access_token
+    return _cat(thread_id, token_type=token_type).access_token
 
 
 class TestRegisterEndpoint:
@@ -164,7 +164,7 @@ class TestSessionCreateEndpoint:
         mock_db.create_session.return_value = fake_session
 
         # Build a valid token for user_id=7
-        token = _make_token("7")
+        token = _make_token("7", token_type="user")
         headers = {"Authorization": f"Bearer {token}"}
 
         response = await async_client.post("/api/v1/auth/session", headers=headers)
@@ -186,10 +186,10 @@ class TestSessionCreateEndpoint:
         response = await async_client.post("/api/v1/auth/session", headers=headers)
         assert response.status_code == 401
 
-    async def test_create_session_no_token_returns_403(self, async_client, mock_db):
-        """Missing Authorization header returns 403 (HTTPBearer default)."""
+    async def test_create_session_no_token_returns_401(self, async_client, mock_db):
+        """Missing Authorization header returns 401 (auto_error=False, manual check)."""
         response = await async_client.post("/api/v1/auth/session")
-        assert response.status_code == 403
+        assert response.status_code == 401
 
 
 class TestSessionNameUpdateEndpoint:
@@ -279,7 +279,7 @@ class TestGetUserSessionsEndpoint:
         mock_db.get_user.return_value = fake_user
         mock_db.get_user_sessions.return_value = sessions
 
-        token = _make_token("5")
+        token = _make_token("5", token_type="user")
         headers = {"Authorization": f"Bearer {token}"}
 
         response = await async_client.get("/api/v1/auth/sessions", headers=headers)
@@ -296,7 +296,7 @@ class TestGetUserSessionsEndpoint:
         mock_db.get_user.return_value = fake_user
         mock_db.get_user_sessions.return_value = []
 
-        token = _make_token("6")
+        token = _make_token("6", token_type="user")
         headers = {"Authorization": f"Bearer {token}"}
 
         response = await async_client.get("/api/v1/auth/sessions", headers=headers)
@@ -304,7 +304,7 @@ class TestGetUserSessionsEndpoint:
         assert response.status_code == 200
         assert response.json() == []
 
-    async def test_get_sessions_no_token_returns_403(self, async_client, mock_db):
-        """Missing Authorization header returns 403."""
+    async def test_get_sessions_no_token_returns_401(self, async_client, mock_db):
+        """Missing Authorization header returns 401 (auto_error=False, manual check)."""
         response = await async_client.get("/api/v1/auth/sessions")
-        assert response.status_code == 403
+        assert response.status_code == 401

@@ -30,6 +30,11 @@ from evals.helpers import (
 )
 from evals.metrics import metrics
 from evals.schemas import ScoreSchema
+from evals.trajectory_helpers import (
+    format_trajectory,
+    get_trajectory_messages,
+    load_trajectory_metrics,
+)
 
 
 class Evaluator:
@@ -205,6 +210,220 @@ class Evaluator:
 
         Returns:
             List of traces that haven't been scored yet.
+        """
+        last_24_hours = datetime.now() - timedelta(hours=24)
+        logger.info("fetching_langfuse_traces", from_timestamp=str(last_24_hours))
+        try:
+            traces = self.langfuse.api.trace.list(
+                from_timestamp=last_24_hours, order_by="timestamp.asc", limit=100
+            ).data
+            traces_without_scores = [trace for trace in traces if not trace.scores]
+            return traces_without_scores
+        except Exception as e:
+            logger.error("langfuse_traces_fetch_failed", error=str(e))
+            return []
+
+
+class TrajectoryEvaluator:
+    """Trajectory-level LLM-as-Judge — scores *how* the agent worked, not just the final answer.
+
+    Whereas :class:`Evaluator` scores answer-level metrics (conciseness,
+    relevancy, …) from an input/output pair, this evaluator scores
+    trajectory-level metrics (tool selection, args accuracy, redundant loops,
+    budget adherence) from the **full ordered message sequence** of a trace.
+
+    The two evaluators are intentionally independent (composition, not
+    inheritance): ``TrajectoryEvaluator`` reuses the shared report/push
+    helpers from ``evals.helpers`` and its own copy of the small OpenAI-call
+    + Langfuse-fetch logic, leaving ``Evaluator`` untouched.
+
+    Run offline (costs LLM tokens)::
+
+        python -m evals.main --trajectory
+    """
+
+    def __init__(self):
+        """Initialize with OpenAI + Langfuse clients and trajectory metrics."""
+        self.client = openai.AsyncOpenAI(api_key=settings.EVALUATION_API_KEY, base_url=settings.EVALUATION_BASE_URL)
+        self.langfuse = Langfuse(
+            public_key=settings.LANGFUSE_PUBLIC_KEY,
+            secret_key=settings.LANGFUSE_SECRET_KEY,
+            timeout=60,
+        )
+        self.trajectory_metrics = load_trajectory_metrics()
+        self.report = initialize_report(settings.EVALUATION_LLM)
+        initialize_metrics_summary(self.report, self.trajectory_metrics)
+
+    async def run(self, generate_report_file: bool = True):
+        """Fetch traces, score each against the trajectory rubrics, report.
+
+        Args:
+            generate_report_file: Whether to write a JSON report afterwards.
+        """
+        start_time = time.time()
+        traces = self._fetch_traces()
+        self.report["total_traces"] = len(traces)
+
+        trace_results: dict = {}
+
+        for trace in tqdm(traces, desc="Evaluating trajectories"):
+            trace_id = trace.id
+            trace_results[trace_id] = {
+                "success": False,
+                "metrics_evaluated": 0,
+                "metrics_succeeded": 0,
+                "metrics_results": {},
+            }
+
+            requirement, trajectory = self._extract(trace)
+            if requirement is None or trajectory is None:
+                for metric in self.trajectory_metrics:
+                    update_failure_metrics(self.report, trace_id, metric["name"], trace_results)
+                    trace_results[trace_id]["metrics_evaluated"] += 1
+                process_trace_results(self.report, trace_id, trace_results, len(self.trajectory_metrics))
+                sleep(settings.EVALUATION_SLEEP_TIME)
+                continue
+
+            for metric in tqdm(
+                self.trajectory_metrics,
+                desc=f"Trajectory metrics for {trace_id[:8]}...",
+                leave=False,
+            ):
+                metric_name = metric["name"]
+                score = await self._run_metric_evaluation(metric, requirement, trajectory)
+
+                if score:
+                    self._push_to_langfuse(trace, score, metric)
+                    update_success_metrics(self.report, trace_id, metric_name, score, trace_results)
+                else:
+                    update_failure_metrics(self.report, trace_id, metric_name, trace_results)
+
+                trace_results[trace_id]["metrics_evaluated"] += 1
+
+            process_trace_results(self.report, trace_id, trace_results, len(self.trajectory_metrics))
+            sleep(settings.EVALUATION_SLEEP_TIME)
+
+        self.report["duration_seconds"] = round(time.time() - start_time, 2)
+        calculate_avg_scores(self.report)
+
+        if generate_report_file:
+            generate_report(self.report)
+
+        logger.info(
+            "trajectory_evaluation_completed",
+            total_traces=self.report["total_traces"],
+            successful_traces=self.report["successful_traces"],
+            failed_traces=self.report["failed_traces"],
+            duration_seconds=self.report["duration_seconds"],
+        )
+
+    def _extract(self, trace: TraceWithDetails) -> tuple[str | None, str | None]:
+        """Extract (requirement, formatted trajectory) from a trace.
+
+        Args:
+            trace: The Langfuse trace to extract from.
+
+        Returns:
+            Tuple of (requirement_text, trajectory_text). Either may be
+            ``None`` if the trace has no usable messages.
+        """
+        messages = get_trajectory_messages(trace)
+        if not messages:
+            return None, None
+        # Requirement = the user input (all messages except the last).
+        requirement, _ = get_input_output(trace)
+        trajectory = format_trajectory(messages)
+        return requirement, trajectory
+
+    async def _run_metric_evaluation(self, metric: dict, requirement: str, trajectory: str) -> ScoreSchema | None:
+        """Evaluate one trajectory metric against a trace.
+
+        Args:
+            metric: The trajectory metric definition (``{name, prompt}``).
+            requirement: The user requirement text.
+            trajectory: The formatted ordered step sequence.
+
+        Returns:
+            ScoreSchema with score + reasoning, or ``None`` on failure.
+        """
+        if not requirement or not trajectory:
+            logger.error(
+                "trajectory_metric_evaluation_failed_missing_io",
+                metric_name=metric["name"],
+                has_requirement=bool(requirement),
+                has_trajectory=bool(trajectory),
+            )
+            return None
+        score = await self._call_openai(metric["prompt"], requirement, trajectory)
+        if score:
+            logger.info(
+                "trajectory_metric_evaluation_completed",
+                metric_name=metric["name"],
+                score=score.score,
+                reasoning=score.reasoning,
+            )
+        else:
+            logger.error("trajectory_metric_evaluation_failed", metric_name=metric["name"])
+        return score
+
+    async def _call_openai(self, metric_system_prompt: str, requirement: str, trajectory: str) -> ScoreSchema | None:
+        """Call the LLM judge with a trajectory rubric.
+
+        Args:
+            metric_system_prompt: The trajectory rubric system prompt.
+            requirement: The user requirement text.
+            trajectory: The formatted trajectory.
+
+        Returns:
+            ScoreSchema with score + reasoning, or ``None`` after retries.
+        """
+        num_retries = 3
+        for _ in range(num_retries):
+            try:
+                response = await self.client.beta.chat.completions.parse(
+                    model=settings.EVALUATION_LLM,
+                    messages=[
+                        {"role": "system", "content": metric_system_prompt},
+                        {
+                            "role": "user",
+                            "content": f"Requirement: {requirement}\nTrajectory:\n{trajectory}",
+                        },
+                    ],
+                    response_format=ScoreSchema,
+                )
+                return response.choices[0].message.parsed
+            except Exception as e:
+                sleep_time = 10
+                logger.error(
+                    "trajectory_openai_call_failed",
+                    error=str(e),
+                    sleep_seconds=sleep_time,
+                )
+                sleep(sleep_time)
+                continue
+        return None
+
+    def _push_to_langfuse(self, trace: TraceWithDetails, score: ScoreSchema, metric: dict):
+        """Push a trajectory score to Langfuse.
+
+        Args:
+            trace: The trace to score.
+            score: The evaluation score.
+            metric: The trajectory metric used.
+        """
+        self.langfuse.create_score(
+            trace_id=trace.id,
+            name=metric["name"],
+            data_type="NUMERIC",
+            value=score.score,
+            comment=score.reasoning,
+        )
+
+    def _fetch_traces(self) -> list[TraceWithDetails]:
+        """Fetch unscored traces from the past 24 hours.
+
+        Returns:
+            List of traces without existing scores.
         """
         last_24_hours = datetime.now() - timedelta(hours=24)
         logger.info("fetching_langfuse_traces", from_timestamp=str(last_24_hours))

@@ -74,6 +74,17 @@ def _extract_cache_query(messages: LanguageModelInput) -> Optional[str]:
     return None
 
 
+def _is_tool_call_response(result: Any) -> bool:
+    """Return ``True`` when an LLM result contains tool calls.
+
+    Tool-call responses depend on live tool output and are therefore
+    non-deterministic across calls. They must never be cached or served
+    from the cache, otherwise a stale text answer could be returned for a
+    query whose correct answer requires a fresh tool invocation.
+    """
+    return isinstance(result, AIMessage) and bool(result.tool_calls)
+
+
 class LLMService:
     """Service for managing LLM calls with retries and circular fallback.
 
@@ -161,11 +172,14 @@ class LLMService:
                 provided the call chains ``.with_structured_output(schema)``
                 and returns a validated instance of that schema instead of a
                 raw ``BaseMessage``.
-            cacheable: When ``True`` and no ``response_format`` and no tools
-                are bound, check the semantic cache before calling the LLM.
-                On a hit, return the cached response as an ``AIMessage``
-                without making an LLM call.  On a miss, store the response
-                after the call succeeds.
+            cacheable: When ``True`` and no ``response_format`` is used, check
+                the semantic cache before calling the LLM.  Whether tools are
+                bound to the model does not disable caching — most chat
+                answers are plain text and are cached regardless.  On a hit,
+                return the cached response as an ``AIMessage`` without making
+                an LLM call.  On a miss, store the response after the call
+                succeeds, unless the response contains tool calls (which are
+                non-deterministic and must not be cached).
             cache_user_id: User ID for per-user cache scoping.  Required when
                 ``cacheable`` is ``True`` to avoid cross-user cache pollution.
             **model_kwargs: Extra kwargs forwarded to ``LLMRegistry.get`` when
@@ -180,10 +194,13 @@ class LLMService:
             RuntimeError: When all models fail after retries or the total
                 timeout budget is exceeded.
         """
-        # Check semantic cache for cacheable text-only calls (no tools, no
-        # structured output).  Tool calls are side-effectful and must not be
-        # cached; structured output is context-dependent.
-        if cacheable and response_format is None and not self._bound_tools:
+        # Check semantic cache for cacheable text-only calls (no structured
+        # output). Whether tools are bound to the model is irrelevant here:
+        # the chat agent always binds tools, yet most answers are plain text
+        # that should be cached. We only skip serving a cached answer when the
+        # *response itself* contains tool calls (handled on the write side),
+        # because tool-call results are non-deterministic.
+        if cacheable and response_format is None:
             query = _extract_cache_query(messages)
             if query:
                 cached = await semantic_cache.get(
@@ -208,8 +225,10 @@ class LLMService:
             )
             raise RuntimeError(f"llm call timed out after {settings.LLM_TOTAL_TIMEOUT}s total budget")
 
-        # Store successful text-only responses in semantic cache.
-        if cacheable and response_format is None and not self._bound_tools:
+        # Store successful text-only responses in semantic cache. Skip
+        # tool-call responses (non-deterministic) even though tools may be
+        # bound to the model for this call.
+        if cacheable and response_format is None and not _is_tool_call_response(result):
             if isinstance(result, BaseMessage) and isinstance(result.content, str):
                 query = _extract_cache_query(messages)
                 if query and result.content:

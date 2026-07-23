@@ -72,6 +72,9 @@ eval-quick:
 eval-no-report:
 	@$(call run_with_env,python -m evals.main --no-report)
 
+eval-trajectory:
+	@$(call run_with_env,python -m evals.main --trajectory)
+
 # ---------------------------------------------------------------------------
 # Code quality
 # ---------------------------------------------------------------------------
@@ -92,6 +95,9 @@ test:
 
 test-e2e:
 	@$(call run_with_env,python evals/sdlc_evals.py)
+test-regression:
+	uv run pytest tests/test_eval_regression.py -v --tb=short -m "regression"
+
 
 ui:
 	uv run streamlit run ui/app.py --server.port 8501
@@ -196,7 +202,13 @@ help:
 	@echo "  eval                 Run evals (interactive)"
 	@echo "  eval-quick           Run evals (default settings)"
 	@echo "  eval-no-report       Run evals without report"
+`@echo "  eval-trajectory     Run trajectory-level LLM-as-Judge (offline)"
 	@echo ""
+`@echo "Testing:"
+`@echo "  test                Run all tests"
+`@echo "  test-e2e            Run end-to-end SDLC evals"
+`@echo "  test-regression     Run trajectory regression gate (CI-safe)"
+`@echo ""
 	@echo "Code quality:"
 	@echo "  lint                 Ruff lint check"
 	@echo "  format               Ruff format"
@@ -224,7 +236,8 @@ help:
 
 .PHONY: install dev staging prod _serve \
         migrate migration migrate-downgrade migrate-history \
-        eval eval-quick eval-no-report \
+        eval eval-quick eval-no-report eval-trajectory \
+        test-regression \
         lint format typecheck check pre-commit pre-commit-update \
         docker-build docker-up docker-down docker-logs docker-migrate \
         docker-migrate-downgrade docker-migrate-history \

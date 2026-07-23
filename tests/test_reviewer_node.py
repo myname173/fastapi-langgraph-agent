@@ -2,8 +2,8 @@
 
 Covers:
 - Happy path: low/medium feedback → Command(goto="supervisor"), no interrupt
-- High severity feedback → langgraph_interrupt() is triggered
-- Critical severity feedback → langgraph_interrupt() is triggered
+- High severity feedback → human_approval_needed=True (C-7 fix)
+- Critical severity feedback → human_approval_needed=True (C-7 fix)
 - Empty feedback → succeeds, human_approval_needed=False
 - LLM failure → error Command(goto="supervisor")
 - Verify set_llm_context wraps the LLM call (agent_name="reviewer")
@@ -134,10 +134,10 @@ class TestReviewerNodeHappyPath:
 
 
 class TestReviewerNodeHumanInterruption:
-    """Tests for the high/critical severity interrupt path."""
+    """Tests for the high/critical severity human approval path (C-7 fix)."""
 
     async def test_high_severity_triggers_interrupt(self):
-        """High-severity feedback triggers langgraph_interrupt()."""
+        """High-severity feedback sets human_approval_needed=True (C-7 fix)."""
         review = ReviewerOutput(
             feedback=[FeedbackItem(agent_name="reviewer", content="security hole", severity="high")],
             summary="needs approval",
@@ -149,15 +149,14 @@ class TestReviewerNodeHumanInterruption:
             patch("app.core.langgraph.agents.reviewer_node.load_agent_prompt", return_value="sys"),
             patch("app.core.langgraph.agents.reviewer_node.prepare_sdlc_messages", return_value=[]),
             patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
-            patch(
-                "app.core.langgraph.agents.reviewer_node.langgraph_interrupt", side_effect=GraphInterrupt("approval")
-            ),
         ):
-            with pytest.raises(GraphInterrupt):
-                await node(_base_state())
+            result = await node(_base_state())
+
+        assert result.goto == "supervisor"
+        assert result.update["human_approval_needed"] is True
 
     async def test_critical_severity_triggers_interrupt(self):
-        """Critical-severity feedback triggers langgraph_interrupt()."""
+        """Critical-severity feedback sets human_approval_needed=True (C-7 fix)."""
         review = ReviewerOutput(
             feedback=[FeedbackItem(agent_name="reviewer", content="data leak", severity="critical")],
             summary="critical issue",
@@ -169,15 +168,14 @@ class TestReviewerNodeHumanInterruption:
             patch("app.core.langgraph.agents.reviewer_node.load_agent_prompt", return_value="sys"),
             patch("app.core.langgraph.agents.reviewer_node.prepare_sdlc_messages", return_value=[]),
             patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
-            patch(
-                "app.core.langgraph.agents.reviewer_node.langgraph_interrupt", side_effect=GraphInterrupt("approval")
-            ),
         ):
-            with pytest.raises(GraphInterrupt):
-                await node(_base_state())
+            result = await node(_base_state())
+
+        assert result.goto == "supervisor"
+        assert result.update["human_approval_needed"] is True
 
     async def test_mixed_severity_with_one_high_triggers_interrupt(self):
-        """One high-severity item in a mixed list triggers interrupt."""
+        """One high-severity item in a mixed list sets human_approval_needed=True (C-7 fix)."""
         review = ReviewerOutput(
             feedback=[
                 FeedbackItem(agent_name="reviewer", content="low issue", severity="low"),
@@ -192,10 +190,11 @@ class TestReviewerNodeHumanInterruption:
             patch("app.core.langgraph.agents.reviewer_node.load_agent_prompt", return_value="sys"),
             patch("app.core.langgraph.agents.reviewer_node.prepare_sdlc_messages", return_value=[]),
             patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
-            patch("app.core.langgraph.agents.reviewer_node.langgraph_interrupt", side_effect=GraphInterrupt("stop")),
         ):
-            with pytest.raises(GraphInterrupt):
-                await node(_base_state())
+            result = await node(_base_state())
+
+        assert result.goto == "supervisor"
+        assert result.update["human_approval_needed"] is True
 
 
 class TestReviewerNodeFailure:

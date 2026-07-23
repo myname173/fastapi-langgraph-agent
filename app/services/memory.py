@@ -152,5 +152,30 @@ class MemoryService:
             _memory_breaker.record_failure()
             logger.exception("failed_to_update_long_term_memory", user_id=user_id, error=str(e))
 
+    async def clear_user_memory(self, user_id: str | None) -> None:
+        """Delete all long-term memories for a user and invalidate caches.
+
+        Args:
+            user_id: The user whose memories should be cleared. No-op when
+                ``None`` (anonymous sessions have no long-term memory).
+        """
+        if user_id is None:
+            return
+        if _memory_breaker.is_open:
+            logger.debug("memory_clear_short_circuited", user_id=user_id)
+            return
+        try:
+            memory = await self._get_memory()
+            await memory.delete_all(user_id=str(user_id))
+            # Critical: invalidate the semantic cache so subsequent searches
+            # don't return the stale cached memory string. Without this, the
+            # clear has no observable effect until the cache TTL expires.
+            await semantic_cache.invalidate_user("memory", str(user_id))
+            _memory_breaker.record_success()
+            logger.info("user_memory_cleared", user_id=user_id)
+        except Exception as e:
+            _memory_breaker.record_failure()
+            logger.exception("failed_to_clear_user_memory", user_id=user_id, error=str(e))
+
 
 memory_service = MemoryService()

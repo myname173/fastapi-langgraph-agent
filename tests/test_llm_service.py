@@ -22,6 +22,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from openai import APIError
 from pydantic import BaseModel
 
+from app.core.semantic_cache import semantic_cache
 from app.services.llm.service import LLMService, _extract_cache_query
 
 
@@ -294,3 +295,113 @@ class TestLLMServiceBindTools:
         # Should not raise — the guard short-circuits when _llm is None
         service.bind_tools([MagicMock()])
         assert service._bound_tools == []
+
+
+class TestSemanticCacheWithToolsBound:
+    """Regression tests for P2.
+
+    The chat agent calls ``llm_service.bind_tools(...)`` on the shared
+    singleton during ``LangGraphAgent.__init__``. That used to set
+    ``self._bound_tools`` permanently, and the cache guard ``not
+    self._bound_tools`` then disabled the semantic cache for *every* chat
+    call. Caching must now work regardless of bound tools, while tool-call
+    responses (non-deterministic) remain uncached.
+    """
+
+    async def _make_service(self) -> LLMService:
+        with patch("app.services.llm.service.LLMRegistry") as mock_registry:
+            mock_registry.LLMS = [{"name": "qwen3.7-plus", "llm": MagicMock()}]
+            mock_registry.get_all_names.return_value = ["qwen3.7-plus"]
+            return LLMService()
+
+    async def test_cache_hit_ignores_bound_tools(self):
+        """A cache hit is served even when tools are bound (the old bug)."""
+        service = await self._make_service()
+        # Mirror LangGraphAgent.__init__ mutating the singleton.
+        service._bound_tools = [MagicMock()]
+
+        async def fake_get(*_a, **_k):
+            return "cached investment advice"
+
+        with (
+            patch.object(semantic_cache, "get", side_effect=fake_get),
+            patch.object(semantic_cache, "set", new=AsyncMock()),
+        ):
+            with patch.object(service, "_invoke_with_retry", new=AsyncMock()) as mock_invoke:
+                result = await service.call(
+                    [{"role": "user", "content": "what is a good strategy"}],
+                    cacheable=True,
+                    cache_user_id="u1",
+                )
+        assert isinstance(result, AIMessage)
+        assert result.content == "cached investment advice"
+        # Served from cache — the LLM must not have been invoked.
+        mock_invoke.assert_not_called()
+
+    async def test_cache_miss_writes_when_tools_bound(self):
+        """On a miss, the text response is written even with tools bound."""
+        service = await self._make_service()
+        service._bound_tools = [MagicMock()]
+
+        async def fake_get(*_a, **_k):
+            return None  # miss
+
+        captured: dict = {}
+
+        async def fake_set(*_a, **_k):
+            captured.update(_k)
+
+        with (
+            patch.object(semantic_cache, "get", side_effect=fake_get),
+            patch.object(semantic_cache, "set", side_effect=fake_set),
+        ):
+            with (
+                patch.object(service, "_build_target", new=MagicMock()),
+                patch.object(
+                    service,
+                    "_invoke_with_retry",
+                    new=AsyncMock(return_value=AIMessage(content="fresh answer")),
+                ),
+            ):
+                result = await service.call(
+                    [{"role": "user", "content": "explain compound interest"}],
+                    cacheable=True,
+                    cache_user_id="u2",
+                )
+        assert result.content == "fresh answer"
+        # Write should have been attempted despite tools being bound.
+        assert captured, "expected the response to be written to the cache"
+
+    async def test_tool_call_response_not_cached(self):
+        """A response with tool calls is never written to the cache."""
+        service = await self._make_service()
+        service._bound_tools = [MagicMock()]
+
+        tool_response = AIMessage(
+            content="calling tool",
+            tool_calls=[{"name": "get_quote", "args": {"symbol": "AAPL"}, "id": "1"}],
+        )
+
+        async def fake_get(*_a, **_k):
+            return None  # miss
+
+        wrote = {"called": False}
+
+        async def fake_set(*_a, **_k):
+            wrote["called"] = True
+
+        with (
+            patch.object(semantic_cache, "get", side_effect=fake_get),
+            patch.object(semantic_cache, "set", side_effect=fake_set),
+        ):
+            with (
+                patch.object(service, "_build_target", new=MagicMock()),
+                patch.object(service, "_invoke_with_retry", new=AsyncMock(return_value=tool_response)),
+            ):
+                result = await service.call(
+                    [{"role": "user", "content": "what is the price of AAPL"}],
+                    cacheable=True,
+                    cache_user_id="u3",
+                )
+        assert result.tool_calls  # passthrough to tool-call routing
+        assert wrote["called"] is False, "tool-call responses must not be cached"

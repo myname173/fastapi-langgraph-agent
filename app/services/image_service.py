@@ -10,6 +10,7 @@ import base64
 import hashlib
 import io
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -21,8 +22,10 @@ except ImportError:
 from app.core.config import settings
 from app.core.logging import logger
 from app.services.llm.service import llm_service
+from app.services.llm.registry import LLMRegistry
 from app.services.quota_service import quota_service
 from app.schemas import ImageAnalysisResult
+from app.schemas.chat import InvestmentImageAnalysis
 
 
 class ImageService:
@@ -307,6 +310,125 @@ class ImageService:
                 key_elements=[],
                 suggestions=[],
             )
+
+    _INVESTMENT_VISION_PROMPT = """你是一名严谨的投资/股票知识助手。用户上传了一张与投资相关的图片（如K线图、行情截图、财务报表、券商研报等）。
+
+请：
+1. 用通俗中文描述图片中可见的内容与关键要素（如标的名称、价格、涨跌幅、时间范围、图表类型、重要数字或标签）。
+2. 只做客观描述与信息提取；不要给出买卖建议，不要预测涨跌，不要推荐具体标的。
+3. 在描述末尾附加一句：以上仅为图片内容解读，不构成任何投资建议；投资有风险，决策需谨慎。
+
+以结构化结果返回：description 为通俗描述，key_elements 为关键要素列表。"""
+
+    async def analyze_investment_image(
+        self,
+        image_input: str,
+        task_id: str = "chat",
+        user_id: Optional[int] = None,
+        temp: bool = False,
+    ) -> Optional[InvestmentImageAnalysis]:
+        """Analyze an investment-related image for the chat mode (Route B).
+
+        Chat-only path: describe-only (no buy/sell advice). Accepts an http(s)
+        URL or a base64 ``data:image/...;base64,...`` string. On any failure
+        (multimodal disabled, decode error, VLM unreachable, circuit open)
+        returns ``None`` so the caller degrades to plain-text chat instead of
+        raising.
+
+        Args:
+            image_input: http(s) URL or base64 image data URL.
+            task_id: Namespace for the persisted image. Pass the real task id
+                for SDLC tasks; for transient chat uploads prefer ``temp=True``.
+            user_id: Optional user id, used only for logging context.
+            temp: When ``True`` the image is stored under an ephemeral
+                per-request namespace and deleted immediately after analysis.
+                This keeps chat uploads from accumulating in the session
+                workspace or exhausting ``MAX_IMAGES_PER_TASK`` over a long
+                conversation.
+
+        Returns:
+            InvestmentImageAnalysis or None on failure / disabled.
+        """
+        if not settings.ENABLE_MULTIMODAL:
+            logger.info("vision_analysis_disabled", task_id=task_id)
+            return None
+
+        # Transient chat uploads use a throwaway namespace that is cleaned up
+        # after analysis (see finally below). This prevents them from counting
+        # against the session's MAX_IMAGES_PER_TASK quota or polluting the
+        # persistent SDLC workspace.
+        temp_task_id = f"chat-tmp-{uuid.uuid4().hex}" if temp else None
+        if temp_task_id is not None:
+            task_id = temp_task_id
+
+        try:
+            # 1) Resolve image bytes (base64 data URL or remote URL).
+            if image_input.startswith("data:image"):
+                header, _, payload = image_input.partition(",")
+                if ";base64" not in header:
+                    logger.warning("vision_unknown_data_url", task_id=task_id)
+                    return None
+                try:
+                    image_bytes = base64.b64decode(payload)
+                except Exception:
+                    logger.warning("vision_base64_decode_failed", task_id=task_id)
+                    return None
+                image_id = await self.save_uploaded_image(image_bytes, task_id)
+            elif image_input.startswith(("http://", "https://")):
+                image_id = await self.save_image_from_url(image_input, task_id)
+            else:
+                logger.warning("vision_unsupported_input", task_id=task_id)
+                return None
+
+            # 2) Build the data URL the VLM consumes.
+            image_path = self.get_image_path(image_id, task_id)
+            if image_path is None or not image_path.exists():
+                logger.warning("vision_image_path_missing", task_id=task_id, image_id=image_id)
+                return None
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            image_format = image_path.suffix[1:].lower()
+            image_url = f"data:image/{image_format};base64,{base64.b64encode(image_data).decode('utf-8')}"
+
+            # 3) Ensure the vision model is registered so LLMService can route it.
+            LLMRegistry.ensure_model(settings.VISION_MODEL)
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": self._INVESTMENT_VISION_PROMPT},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ]
+            response = await llm_service.call(
+                messages,
+                model_name=settings.VISION_MODEL,
+                response_format=InvestmentImageAnalysis,
+                max_tokens=settings.VISION_MAX_TOKENS,
+                metadata={"task_id": task_id, "image_id": image_id},
+            )
+
+            if isinstance(response, InvestmentImageAnalysis):
+                return response
+            # Defensive: coerce unexpected shapes into the expected schema.
+            return InvestmentImageAnalysis(
+                image_id=image_id,
+                description=getattr(response, "description", str(response)),
+                key_elements=getattr(response, "key_elements", []) or [],
+            )
+        except Exception as e:
+            logger.error("vision_analysis_failed", task_id=task_id, error=str(e))
+            return None
+        finally:
+            # Remove the ephemeral namespace so chat uploads never linger on
+            # disk or count against the session image quota.
+            if temp_task_id is not None:
+                try:
+                    await self.cleanup_task_images(temp_task_id)
+                except Exception:
+                    logger.warning("vision_temp_cleanup_failed", task_id=temp_task_id)
 
     async def cleanup_task_images(self, task_id: str) -> int:
         """Clean up all images associated with a task.

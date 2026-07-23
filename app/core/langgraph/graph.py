@@ -1,6 +1,7 @@
 """This file contains the LangGraph Agent/workflow and interactions with the LLM."""
 
 import asyncio
+import time
 from typing import (
     AsyncGenerator,
     Optional,
@@ -50,8 +51,11 @@ from app.schemas import (
     GraphState,
     Message,
 )
+from app.services.image_service import image_service
 from app.services.llm import llm_service
 from app.services.memory import memory_service
+from app.services.quota_service import quota_service
+from app.schemas.chat import ChatImage
 from app.utils import (
     dump_messages,
     extract_text_content,
@@ -114,7 +118,11 @@ class LangGraphAgent:
         username = config.get("metadata", {}).get("username")
         user_id = config.get("metadata", {}).get("user_id")
         thread_id = config.get("configurable", {}).get("thread_id")
-        SYSTEM_PROMPT = load_system_prompt(username=username, long_term_memory=state["long_term_memory"])
+        SYSTEM_PROMPT = load_system_prompt(
+            username=username,
+            long_term_memory=state["long_term_memory"],
+            vision_context=state.get("vision_context", ""),
+        )
 
         # Prepare messages with system prompt
         messages = prepare_messages(state["messages"], SYSTEM_PROMPT)
@@ -250,12 +258,64 @@ class LangGraphAgent:
             raise RuntimeError("graph initialization failed")
         return self._graph
 
+    async def _resolve_vision_context(
+        self,
+        images: Optional[list[ChatImage]],
+        user_id: Optional[str],
+        session_id: str,
+    ) -> Optional[str]:
+        """Resolve uploaded chat images into a text vision-context block.
+
+        Routes each image through the vision model (Route B) and concatenates
+        describe-only summaries for injection into the system prompt. Returns
+        None when multimodal is disabled, no images are attached, or every
+        analysis fails — so the caller simply proceeds with plain-text chat.
+
+        Args:
+            images: Optional chat images from the request.
+            user_id: User id, used for daily quota accounting.
+            session_id: Chat session id, used for log correlation.
+
+        Returns:
+            Optional[str]: Concatenated vision context, or None.
+        """
+        if not settings.ENABLE_MULTIMODAL or not images:
+            return None
+        blocks: list[str] = []
+        for img in images:
+            if not quota_service.check_vision_quota(user_id):
+                logger.warning("vision_quota_exceeded", session_id=session_id, user_id=user_id)
+                break
+            try:
+                # Use an ephemeral per-request namespace: chat uploads are
+                # transient and must not accumulate under the session workspace
+                # or exhaust MAX_IMAGES_PER_TASK over a long conversation.
+                analysis = await image_service.analyze_investment_image(
+                    image_input=img.data,
+                    user_id=user_id,
+                    temp=True,
+                )
+            except Exception as e:
+                logger.warning("vision_context_single_failed", session_id=session_id, error=str(e))
+                continue
+            if analysis is None:
+                continue
+            line = f"- {analysis.description}"
+            if analysis.key_elements:
+                line += f"\n  关键要素: {', '.join(analysis.key_elements)}"
+            blocks.append(line)
+            quota_service.increment_vision_usage(user_id)
+        if not blocks:
+            return None
+        return "以下是用户本次上传图片的视觉解读（由视觉模型生成，仅供参考，不构成投资建议）：\n" + "\n".join(blocks)
+
     async def get_response(
         self,
         messages: list[Message],
         session_id: str,
         user_id: Optional[str] = None,
         username: Optional[str] = None,
+        images: Optional[list[ChatImage]] = None,
     ) -> list[Message]:
         """Get a response from the LLM.
 
@@ -283,11 +343,15 @@ class LangGraphAgent:
         }
 
         try:
+            t0 = time.perf_counter()
             # Run state check and memory search concurrently to save 200-500ms
             state, relevant_memory = await asyncio.gather(
                 graph.aget_state(config),
                 memory_service.search(user_id, messages[-1].content),
             )
+            memory_latency_ms = round((time.perf_counter() - t0) * 1000)
+
+            vision_context = await self._resolve_vision_context(images, user_id, session_id)
 
             if state.next:
                 logger.info("resuming_interrupted_graph", session_id=session_id, next_nodes=state.next)
@@ -298,7 +362,11 @@ class LangGraphAgent:
             else:
                 relevant_memory = relevant_memory or "No relevant memory found."
                 response = await graph.ainvoke(
-                    input={"messages": dump_messages(messages), "long_term_memory": relevant_memory},
+                    input={
+                        "messages": dump_messages(messages),
+                        "long_term_memory": relevant_memory,
+                        "vision_context": vision_context or "",
+                    },
                     config=config,
                 )
 
@@ -313,6 +381,13 @@ class LangGraphAgent:
             await task_manager.schedule(
                 memory_service.add(user_id, openai_msgs, config.get("metadata")),
                 name="memory_add",
+            )
+            total_latency_ms = round((time.perf_counter() - t0) * 1000)
+            logger.info(
+                "chat_response_latency",
+                session_id=session_id,
+                memory_latency_ms=memory_latency_ms,
+                total_latency_ms=total_latency_ms,
             )
             return self.__process_messages(response["messages"])
         except GraphInterrupt:
@@ -330,6 +405,7 @@ class LangGraphAgent:
         session_id: str,
         user_id: Optional[str] = None,
         username: Optional[str] = None,
+        images: Optional[list[ChatImage]] = None,
     ) -> AsyncGenerator[str, None]:
         """Get a stream response from the LLM.
 
@@ -357,18 +433,26 @@ class LangGraphAgent:
         graph = await self._get_graph()
 
         try:
+            t0 = time.perf_counter()
             # Run state check and memory search concurrently to save 200-500ms
             state, relevant_memory = await asyncio.gather(
                 graph.aget_state(config),
                 memory_service.search(user_id, messages[-1].content),
             )
+            memory_latency_ms = round((time.perf_counter() - t0) * 1000)
+
+            vision_context = await self._resolve_vision_context(images, user_id, session_id)
 
             if state.next:
                 logger.info("resuming_interrupted_graph_stream", session_id=session_id, next_nodes=state.next)
                 graph_input = Command(resume=messages[-1].content)
             else:
                 relevant_memory = relevant_memory or "No relevant memory found."
-                graph_input = {"messages": dump_messages(messages), "long_term_memory": relevant_memory}
+                graph_input = {
+                    "messages": dump_messages(messages),
+                    "long_term_memory": relevant_memory,
+                    "vision_context": vision_context or "",
+                }
 
             async for token, _ in graph.astream(
                 graph_input,
@@ -394,6 +478,13 @@ class LangGraphAgent:
                     memory_service.add(user_id, openai_msgs, config.get("metadata")),
                     name="memory_add",
                 )
+            total_latency_ms = round((time.perf_counter() - t0) * 1000)
+            logger.info(
+                "chat_stream_latency",
+                session_id=session_id,
+                memory_latency_ms=memory_latency_ms,
+                total_latency_ms=total_latency_ms,
+            )
         except GraphInterrupt:
             state = await graph.aget_state(config)
             interrupt_value = state.tasks[0].interrupts[0].value if state.tasks else "Waiting for input."
@@ -427,11 +518,16 @@ class LangGraphAgent:
             if message["role"] in ["assistant", "user"] and message["content"]
         ]
 
-    async def clear_chat_history(self, session_id: str) -> None:
-        """Clear all chat history for a given thread ID.
+    async def clear_chat_history(self, session_id: str, user_id: Optional[str] = None, scope: str = "session") -> None:
+        """Clear chat history for a session, optionally also clearing long-term memory.
 
         Args:
             session_id: The ID of the session to clear history for.
+            user_id: The user ID, required when ``scope="all"`` to clear
+                long-term memory.
+            scope: ``"session"`` (default) clears only the checkpointer;
+                ``"all"`` also clears the user's long-term memory (mem0) and
+                invalidates the memory semantic cache.
 
         Raises:
             Exception: If there's an error clearing the chat history.
@@ -453,6 +549,14 @@ class LangGraphAgent:
                 logger.info(
                     "checkpoint_tables_cleared_for_session",
                     tables=settings.CHECKPOINT_TABLES,
+                    session_id=session_id,
+                )
+
+            if scope == "all" and user_id:
+                await memory_service.clear_user_memory(user_id)
+                logger.info(
+                    "long_term_memory_cleared_for_user",
+                    user_id=user_id,
                     session_id=session_id,
                 )
 

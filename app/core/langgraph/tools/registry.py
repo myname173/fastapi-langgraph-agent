@@ -130,25 +130,52 @@ class ToolRegistry:
         """Return all registered tool names (for diagnostics)."""
         return list(self._tools.keys())
 
-    async def register_mcp_server(self, url: str) -> list[str]:
+    async def register_mcp_server(
+        self,
+        url: str,
+        transport: str | None = None,
+    ) -> list[str]:
         """Load tools from a remote MCP server and register them.
 
         Uses ``langchain-mcp-adapters`` to convert MCP tools into LangChain
         ``BaseTool`` instances, then registers each with the ``mcp`` tag.
-        The MCP server URL can use SSE transport (``http://host/sse``).
+
+        Transport is configuration-driven (no hard-coding):
+          * ``streamable_http`` (default, MCP 2026 production standard) —
+            URL form ``http://host:port/mcp``
+          * ``sse`` (legacy, deprecated) — URL form ``http://host:port/sse``
+          * ``stdio`` (local subprocess) — not wired through this entry
+            point; caller should use ``MultiServerMCPClient`` directly
+            because stdio requires ``command``/``args`` fields, not a URL.
 
         This method is **non-fatal**: if the ``mcp`` or
         ``langchain-mcp-adapters`` packages are not installed, or the server
-        is unreachable, it logs a warning and returns an empty list.  This
-        keeps the application startup resilient — MCP is an opt-in
-        enhancement, not a hard dependency.
+        is unreachable, or the transport is unsupported, it logs a warning
+        and returns an empty list.  This keeps the application startup
+        resilient — MCP is an opt-in enhancement, not a hard dependency.
 
         Args:
-            url: MCP server URL (e.g. ``"http://localhost:8080/sse"``).
+            url: MCP server URL (e.g. ``"http://localhost:8002/mcp"``).
+            transport: MCP transport protocol.  ``None`` reads from
+                ``settings.MCP_DEFAULT_TRANSPORT`` (default
+                ``"streamable_http"``).  Supported values: ``"streamable_http"``,
+                ``"sse"``.
 
         Returns:
             List of tool names successfully registered from this server.
         """
+        if transport is None:
+            transport = settings.MCP_DEFAULT_TRANSPORT
+
+        # stdio requires command/args (not a URL) — gracefully skip here.
+        if transport == "stdio":
+            logger.warning(
+                "mcp_stdio_transport_not_supported_via_url",
+                url=url,
+                hint="Use MultiServerMCPClient directly for stdio transport",
+            )
+            return []
+
         try:
             # Lazy import — avoids hard dependency on mcp packages.
             from langchain_mcp_adapters.client import MultiServerMCPClient  # pyright: ignore[reportMissingImports]
@@ -161,13 +188,14 @@ class ToolRegistry:
             return []
 
         try:
-            # Parse URL into the MCP client config format.
-            # SSE transport is the most common for remote MCP servers.
+            # Build client config — transport key matches MultiServerMCPClient
+            # expectations (streamable_http / sse). URL is opaque to us; the
+            # server's mount path (e.g. /mcp vs /sse) is the operator's choice.
             client = MultiServerMCPClient(
                 {
                     "mcp_server": {
                         "url": url,
-                        "transport": "sse",
+                        "transport": transport,
                     }
                 }
             )
@@ -187,15 +215,17 @@ class ToolRegistry:
             logger.info(
                 "mcp_server_loaded",
                 url=url,
+                transport=transport,
                 tool_count=len(registered),
                 tools=registered,
             )
             return registered
 
         except Exception as e:
-            logger.warning(
+            logger.exception(
                 "mcp_server_load_failed",
                 url=url,
+                transport=transport,
                 error=str(e),
             )
             return []
@@ -245,6 +275,7 @@ def _build_default_registry() -> ToolRegistry:
     from app.core.langgraph.tools.duckduckgo_search import duckduckgo_search_tool
     from app.core.langgraph.tools.knowledge_base_tools import knowledge_base_tools_list
     from app.core.langgraph.tools.media_tools import media_tools_list
+    from app.core.langgraph.tools.quote_tools import quote_tools_list
     from app.core.langgraph.tools.sdlc_tools import sdlc_tools_list
 
     registry = ToolRegistry()
@@ -252,6 +283,18 @@ def _build_default_registry() -> ToolRegistry:
     # -- Chat agent (LangGraphAgent) -------------------------------------
     registry.register(duckduckgo_search_tool, agents={"chat"}, tags={"search", "web"})
     registry.register(ask_human, agents={"chat"}, tags={"human_loop"})
+
+    # -- Real-time market quote tool (chat agent) -----------------------
+    # Distinct from KB: KB is point-in-time snapshots, this fetches live
+    # data on demand. Gated by ENABLE_REALTIME_QUOTES so the whole
+    # feature can be disabled if upstream becomes unavailable.
+    for quote_tool in quote_tools_list:
+        registry.register(
+            quote_tool,
+            agents={"chat"},
+            requires={"ENABLE_REALTIME_QUOTES"},
+            tags={"finance", "real_time"},
+        )
 
     # -- Knowledge base tools (chat agent searches user-uploaded docs) --
     # Gated by ENABLE_KNOWLEDGE_BASE — invisible to LLM when flag is off.

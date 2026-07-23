@@ -26,7 +26,11 @@ from app.core.langgraph.agents.context import (
 )
 from app.core.langgraph.agents.supervisor_node import NodeCallable
 from app.core.logging import logger
-from app.core.metrics import sdlc_agent_errors_total, sdlc_agent_execution_seconds
+from app.core.metrics import (
+    mcp_tool_calls_total,
+    sdlc_agent_errors_total,
+    sdlc_agent_execution_seconds,
+)
 from app.core.prompts import load_agent_prompt
 from app.schemas import CoderOutput, SDLCState
 from app.services.llm.usage_tracker import set_llm_context
@@ -558,6 +562,9 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
                         try:
                             result = await tools_by_name[tool_name].ainvoke(args, config=config)
                             tool_messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
+                            # MCP tool invocation metric — success path.
+                            if tool_name.startswith("mcp_"):
+                                mcp_tool_calls_total.labels(tool=tool_name, status="success").inc()
                         except Exception as tool_err:
                             tool_messages.append(
                                 ToolMessage(
@@ -565,6 +572,9 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
                                     tool_call_id=tool_call["id"],
                                 )
                             )
+                            # MCP tool invocation metric — failure path.
+                            if tool_name.startswith("mcp_"):
+                                mcp_tool_calls_total.labels(tool=tool_name, status="failed").inc()
                     else:
                         tool_messages.append(
                             ToolMessage(
@@ -572,6 +582,10 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
                                 tool_call_id=tool_call["id"],
                             )
                         )
+                        # Defensive: unknown mcp_* tool means registry desync —
+                        # surface it as a failure so dashboards can catch it.
+                        if tool_name.startswith("mcp_"):
+                            mcp_tool_calls_total.labels(tool=tool_name, status="failed").inc()
 
                     # Construct code_changes for UI display (from tool_call args).
                     if tool_name == "apply_multi_file_edits":
