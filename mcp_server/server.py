@@ -25,6 +25,7 @@ import logging
 import os
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from mcp_server import git_tools, sqlite_tools
 
@@ -34,17 +35,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# `allowed_hosts` is required because FastMCP enables DNS-rebinding protection
-# by default when bound to a non-localhost interface (0.0.0.0 here). Without it,
-# requests whose Host header isn't in the allowlist are rejected with HTTP 421
-# ("Misdirected Request" / "Invalid Host Header") — which is exactly why the app
-# container (connecting as `http://mcp:8002/mcp`, Host: `mcp`) got tool_count=0
-# while a localhost connection succeeded. `localhost`/`127.0.0.1` cover host-side
-# testing; `mcp` is the docker-compose service name the app client uses. Tighten
-# this to an explicit allowlist for any internet-exposed deployment.
+# DNS-rebinding protection root cause: FastMCP's __init__ auto-enables
+# Host-header validation (enable_dns_rebinding_protection=True) with a
+# localhost-only allowlist whenever the *ctor* `host` is 127.0.0.1/localhost/::1
+# (the default). main() later mutates `mcp.settings.host = "0.0.0.0"`, but
+# transport_security is already baked — so the app container's Host `mcp:8002`
+# is rejected with HTTP 421 while host-side `localhost:8002` passes. Fix: pass
+# an explicit transport_security whose allowed_hosts covers the compose service
+# name `mcp`. `allowed_hosts` is a TransportSecuritySettings field (NOT a FastMCP
+# ctor param — that crashes with TypeError); use `:*` wildcards since httpx sends
+# Host with the port (`mcp:8002`).
 mcp = FastMCP(
     "sdlc-context",
-    allowed_hosts=["mcp", "localhost", "127.0.0.1", "host.docker.internal"],
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "mcp:*",
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+            "host.docker.internal:*",
+        ],
+        allowed_origins=[
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+        ],
+    ),
 )
 
 
