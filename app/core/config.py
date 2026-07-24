@@ -190,10 +190,12 @@ class Settings:
         #   SiliconFlow:      https://api.siliconflow.cn/v1
         #   OpenAI (default): https://api.openai.com/v1
         self.OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        self.DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "gpt-5-mini")
+        self.DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "")
+        # Empty default forces explicit configuration in production/staging —
+        # validate_security() Tier 3 rejects an empty value there. Test/dev
+        # envs are exempt. See .env.example for provider presets.
         # Comma-separated list of model names in the LLMRegistry fallback chain.
-        # DEFAULT_LLM_MODEL must be in this list. See .env.example for presets
-        # (OpenAI / Bailian / SiliconFlow).
+        # DEFAULT_LLM_MODEL must be in this list when set.
         self.LLM_MODELS = parse_list_from_env("LLM_MODELS", ["gpt-5-mini", "gpt-5.4", "gpt-5"])
         # Per-model provider overrides for multi-provider routing (e.g. local
         # vLLM + cloud API). JSON dict: {"model_name": {"base_url": "...",
@@ -721,6 +723,15 @@ class Settings:
             if not self.OPENAI_API_KEY:
                 violations.append(
                     f"OPENAI_API_KEY must be set in {self.ENVIRONMENT.value} (LLM service unavailable without it)"
+                )
+
+            # DEFAULT_LLM_MODEL: empty default removed; production/staging
+            # must set it explicitly so model routing never silently falls
+            # back to a non-existent model name. Mirrors OPENAI_API_KEY guard.
+            if not self.DEFAULT_LLM_MODEL:
+                violations.append(
+                    f"DEFAULT_LLM_MODEL must be set in {self.ENVIRONMENT.value} "
+                    f"(empty default removed to force explicit configuration)"
                 )
 
         if violations:
