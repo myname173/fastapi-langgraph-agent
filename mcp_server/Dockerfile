@@ -7,8 +7,16 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install the MCP SDK only — keeps the image ~50MB.
-RUN pip install --no-cache-dir "mcp>=1.2.0"
+# Install git (hard runtime dep) + the MCP SDK.
+# git_tools.py shells out to `git -C <repo> ...` via subprocess; without the
+# git binary, every mcp_git_* tool fails at the subprocess layer
+# ("git: command not found") even though /workspace is a valid repo — the
+# MCP protocol layer still reports status=success, masking the semantic
+# failure. --no-install-recommends keeps the image lean (~+35MB for git).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir "mcp>=1.2.0"
 
 # Copy the server package.
 COPY mcp_server/ ./mcp_server/
