@@ -33,3 +33,6 @@ logs/
 
 # Local test sqlite artifacts (seed db is generated at runtime by mcp_server/seed_db.py)
 *.db
+
+# SDLC coder agent runtime workspace (generated code artifacts per task)
+workspace/

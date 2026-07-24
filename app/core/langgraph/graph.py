@@ -281,9 +281,13 @@ class LangGraphAgent:
         """
         if not settings.ENABLE_MULTIMODAL or not images:
             return None
+        # Adapt the LangGraph-layer user_id (str from config metadata) to the
+        # service-layer contract (int|None). quota_service and image_service
+        # use int for DB joins; str only flows inside the LangGraph config.
+        uid: Optional[int] = int(user_id) if user_id else None
         blocks: list[str] = []
         for img in images:
-            if not quota_service.check_vision_quota(user_id):
+            if not quota_service.check_vision_quota(uid):
                 logger.warning("vision_quota_exceeded", session_id=session_id, user_id=user_id)
                 break
             try:
@@ -292,7 +296,7 @@ class LangGraphAgent:
                 # or exhaust MAX_IMAGES_PER_TASK over a long conversation.
                 analysis = await image_service.analyze_investment_image(
                     image_input=img.data,
-                    user_id=user_id,
+                    user_id=uid,
                     temp=True,
                 )
             except Exception as e:
@@ -304,7 +308,7 @@ class LangGraphAgent:
             if analysis.key_elements:
                 line += f"\n  关键要素: {', '.join(analysis.key_elements)}"
             blocks.append(line)
-            quota_service.increment_vision_usage(user_id)
+            quota_service.increment_vision_usage(uid)
         if not blocks:
             return None
         return "以下是用户本次上传图片的视觉解读（由视觉模型生成，仅供参考，不构成投资建议）：\n" + "\n".join(blocks)
@@ -324,6 +328,7 @@ class LangGraphAgent:
             session_id (str): The session ID for the conversation.
             user_id (Optional[str]): The user ID for the conversation.
             username (Optional[str]): The display name of the user.
+            images (Optional[list[ChatImage]]): Uploaded images for vision context.
 
         Returns:
             list[Message]: The response from the LLM.
@@ -414,6 +419,7 @@ class LangGraphAgent:
             session_id (str): The session ID for the conversation.
             user_id (Optional[str]): The user ID for the conversation.
             username (Optional[str]): The display name of the user.
+            images (Optional[list[ChatImage]]): Uploaded images for vision context.
 
         Yields:
             str: Tokens of the LLM response.

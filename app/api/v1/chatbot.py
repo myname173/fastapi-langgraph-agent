@@ -66,7 +66,7 @@ async def chat(
             await maybe_name_session(session.id, session.name, chat_request.messages)
 
         if settings.ENABLE_MULTIMODAL and chat_request.images:
-            if not quota_service.check_vision_quota(str(session.user_id)):
+            if not quota_service.check_vision_quota(session.user_id):
                 raise HTTPException(
                     status_code=429,
                     detail="今日视觉分析次数已达上限，请明天再试。",
@@ -131,7 +131,7 @@ async def chat_stream(
             await maybe_name_session(session.id, session.name, chat_request.messages)
 
         if settings.ENABLE_MULTIMODAL and chat_request.images:
-            if not quota_service.check_vision_quota(str(session.user_id)):
+            if not quota_service.check_vision_quota(session.user_id):
                 raise HTTPException(
                     status_code=429,
                     detail="今日视觉分析次数已达上限，请明天再试。",

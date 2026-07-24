@@ -51,7 +51,7 @@ class MediaHistory(SQLModel, table=True):
     # created the table as ``media_history`` (with underscore). Without this,
     # SQLModel derives ``mediahistory`` from the class name and queries
     # against a non-existent relation, returning HTTP 500.
-    __tablename__ = "media_history"
+    __tablename__ = "media_history"  # pyright: ignore[reportAssignmentType]
 
     id: str = Field(primary_key=True)
     user_id: Optional[int] = Field(default=None, index=True)

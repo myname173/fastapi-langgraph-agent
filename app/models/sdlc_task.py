@@ -39,7 +39,7 @@ class SDLCTask(SQLModel, table=True):
     # with the name ``sdlc_task`` (with underscore). Without this, SQLModel
     # derives ``sdlctask`` from the class name and queries against a
     # non-existent relation, returning HTTP 500.
-    __tablename__ = "sdlc_task"
+    __tablename__ = "sdlc_task"  # pyright: ignore[reportAssignmentType]
 
     id: str = Field(primary_key=True)
     thread_id: str = Field(index=True)

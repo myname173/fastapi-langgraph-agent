@@ -191,8 +191,12 @@ class ToolRegistry:
             # Build client config — transport key matches MultiServerMCPClient
             # expectations (streamable_http / sse). URL is opaque to us; the
             # server's mount path (e.g. /mcp vs /sse) is the operator's choice.
+            # langchain-mcp-adapters types the ctor as dict[str, Connection],
+            # but the runtime accepts a nested dict config (url+transport)
+            # per server. This is the documented shape in the library
+            # README; the stub is too strict.
             client = MultiServerMCPClient(
-                {
+                {  # pyright: ignore[reportArgumentType]
                     "mcp_server": {
                         "url": url,
                         "transport": transport,
