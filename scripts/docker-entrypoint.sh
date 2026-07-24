@@ -90,7 +90,20 @@ echo "Database User: $( [[ -n ${POSTGRES_USER:-${DB_USER:-}} ]] && echo 'set' ||
 echo "LLM Model: ${DEFAULT_LLM_MODEL:-Not set}"
 echo "Debug Mode: ${DEBUG:-false}"
 
-# Run migrations if necessary with `make docker-migrate`.
+# Run database migrations on every boot. `alembic upgrade head` is
+# idempotent (a no-op when already at head), so this is safe for
+# restarts. Fail-fast: if migrations fail, `set -e` exits the entrypoint
+# and the container restarts (restart: on-failure) instead of starting
+# uvicorn against a stale/empty schema. Set SKIP_MIGRATIONS=1 to bypass
+# (e.g. for a sidecar one-off command, or when a DBA applied migrations
+# out-of-band).
+if [ "${SKIP_MIGRATIONS:-0}" != "1" ]; then
+    echo "Running database migrations (alembic upgrade head)..."
+    /app/.venv/bin/alembic upgrade head
+    echo "Database migrations completed successfully."
+else
+    echo "SKIP_MIGRATIONS=1 set, skipping database migrations."
+fi
 
 # Execute the CMD
 exec "$@"
