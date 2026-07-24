@@ -13,6 +13,7 @@
  *   POST /api/v1/sdlc/{id}/approve    Bearer <session> -> SDLCResponse
  *   POST /api/v1/sdlc/{id}/reject     Bearer <session> JSON {reason} -> SDLCResponse
  *   GET  /api/v1/sdlc/{id}/state      Bearer <session> -> dict
+ *   GET  /api/v1/sdlc/models          Bearer <session> -> {models:[...], default:str}
  */
 (function (global) {
   "use strict";
@@ -176,6 +177,14 @@
       .then(function (r) { return r.json(); });
   }
 
+  /* List LLM models the user may select for the SDLC coder agent.
+   * Returns {models:[name,...], default:name}. Used by the coder view
+   * to populate the model dropdown. */
+  function getCoderModels() {
+    return authFetch("/sdlc/models")
+      .then(function (r) { return r.json(); });
+  }
+
   function parseError(text, status) {
     try {
       var j = JSON.parse(text);
@@ -194,5 +203,6 @@
     register: register, login: login, createSession: createSession,
     streamSSE: streamSSE,
     approve: approve, reject: reject, getSdlcState: getSdlcState,
+    getCoderModels: getCoderModels,
   };
 })(window);

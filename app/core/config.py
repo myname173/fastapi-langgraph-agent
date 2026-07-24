@@ -206,6 +206,22 @@ class Settings:
                 self.LLM_PROVIDER_OVERRIDES = {}
         except (json.JSONDecodeError, TypeError):
             self.LLM_PROVIDER_OVERRIDES = {}
+        # User-selectable coder models for the SDLC orchestrator (exposed via
+        # GET /api/v1/sdlc/models and the coder view dropdown). Invariants:
+        #   - every entry must be resolvable by LLMRegistry.get() at runtime
+        #     (present in LLM_MODELS or registered via ModelRouter.ensure_model);
+        #     coder_node calls get_llm_for(model_name) with NO fallback.
+        #   - every entry should set max_tokens:8192 in LLM_PROVIDER_OVERRIDES,
+        #     otherwise the default MAX_TOKENS=2000 truncates the multi-file
+        #     CoderOutput JSON and the workflow熔断 trips on parse failure.
+        self.CODER_ELIGIBLE_MODELS = [
+            m.strip()
+            for m in os.getenv(
+                "CODER_ELIGIBLE_MODELS",
+                "qwen3-coder-plus,qwen3.7-max,qwen3.7-max-preview,qwen3.7-plus-2026-05-26,glm-5.2",
+            ).split(",")
+            if m.strip()
+        ]
         self.SESSION_NAMING_ENABLED = os.getenv("SESSION_NAMING_ENABLED", "true").lower() == "true"
         self.DEFAULT_LLM_TEMPERATURE = float(os.getenv("DEFAULT_LLM_TEMPERATURE", "0.2"))
         self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
@@ -376,7 +392,7 @@ class Settings:
 
         # vLLM health monitor — periodic scrape of the local vLLM
         # Prometheus endpoint to surface OOM-risk signals
-        # (num_preemptions_total, gpu_cache_usage_perc). See
+        # (num_preemptions_total, gpu_cache_usage_perc). See  # noqa: ERA001
         # app/core/vllm_health.py for details. Default on because
         # monitoring cost is ~1 HTTP req per interval and vLLM is
         # optional, so no failure mode is destructive.

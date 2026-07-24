@@ -157,6 +157,7 @@ class SupervisorGraph:
         relevant_memory: str,
         project_context: str = "",
         user_id: str = "",
+        coder_model: Optional[str] = None,
     ) -> SDLCState:
         """Build the initial SDLCState for a new workflow invocation.
 
@@ -191,6 +192,8 @@ class SupervisorGraph:
                 "is_complete": False,
                 "validation_results": [],
                 "coder_retry_count": 0,
+                # Per-task coder model override; None => router default.
+                "coder_model": coder_model,
             },
         )
 
@@ -257,6 +260,7 @@ class SupervisorGraph:
         user_id: Optional[str] = None,
         project_context: Optional[str] = None,
         images: Optional[List[str]] = None,
+        coder_model: Optional[str] = None,
     ) -> SDLCState:
         """Get a response from the SDLC Orchestrator."""
         start_time = time.time()
@@ -285,6 +289,7 @@ class SupervisorGraph:
                     relevant_memory,
                     project_context=project_context or "",
                     user_id=user_id or "",
+                    coder_model=coder_model,
                 )
                 initial_state["image_contexts"] = await self._process_images(images or [], session_id)
                 response = await graph.ainvoke(initial_state, config=config)
@@ -342,6 +347,7 @@ class SupervisorGraph:
         user_id: Optional[str] = None,
         project_context: Optional[str] = None,
         images: Optional[List[str]] = None,
+        coder_model: Optional[str] = None,
     ) -> AsyncGenerator[Any, None]:
         """Stream events from the SDLC Orchestrator."""
         start_time = time.time()
@@ -372,6 +378,7 @@ class SupervisorGraph:
                     relevant_memory,
                     project_context=project_context or "",
                     user_id=user_id or "",
+                    coder_model=coder_model,
                 )
                 initial_state["image_contexts"] = await self._process_images(images or [], session_id)
 

@@ -154,6 +154,9 @@ class SDLCRequest(BaseModel):
     requirements: str = Field(..., description="用户需求描述")
     project_context: Optional[str] = Field(None, description="项目上下文信息")
     images: Optional[List[str]] = Field(None, description="图片列表（base64 编码或 URL）")
+    coder_model: Optional[str] = Field(
+        None, description="用户指定的 coder 模型（须在 GET /sdlc/models 返回的可选列表内）"
+    )
 
 
 class SDLCResponse(BaseModel):

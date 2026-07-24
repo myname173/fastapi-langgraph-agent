@@ -32,6 +32,9 @@
             '<textarea id="sdlc-req" placeholder="描述你要开发的软件需求，例如：写一个快速排序并附带单元测试"></textarea>' +
             '<div class="coder-row">' +
               '<span style="color:var(--text-dim);font-size:12px">提交后进入多 agent 流程：规划 → 编码 → 测试 → 审查 → 人工审批</span>' +
+              '<label style="font-size:12px;color:var(--text-dim)">Coder 模型: ' +
+                '<select id="sdlc-model" style="margin-left:4px;max-width:200px"></select>' +
+              '</label>' +
               '<button type="submit" class="btn-primary" style="margin-left:auto">开始</button>' +
             '</div>' +
           '</form>' +
@@ -44,6 +47,8 @@
     this.form = container.querySelector("#sdlc-form");
     this.reqInput = container.querySelector("#sdlc-req");
     this.submitBtn = container.querySelector("#sdlc-form button[type=submit]");
+    this.modelSelect = container.querySelector("#sdlc-model");
+    this.loadCoderModels();
 
     var self = this;
     this.form.addEventListener("submit", function (e) {
@@ -58,6 +63,33 @@
     if (this.abortCtrl) this.abortCtrl.abort();
   };
 
+  /* Populate #sdlc-model from GET /sdlc/models. Non-fatal on failure:
+   * the dropdown stays empty and start() omits coder_model so the
+   * backend falls back to the router default. */
+  Coder.prototype.loadCoderModels = function () {
+    var sel = this.modelSelect;
+    if (!sel) return;
+    var self = this;
+    sel.disabled = true;
+    API.getCoderModels().then(function (data) {
+      var models = (data && data.models) || [];
+      var def = (data && data.default) || "";
+      sel.innerHTML = "";
+      models.forEach(function (name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        if (name === def) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.disabled = false;
+    }).catch(function (err) {
+      sel.innerHTML = '<option value="">(模型列表获取失败)</option>';
+      sel.disabled = false;
+      self.addEvent("error", "模型列表加载失败", err.message);
+    });
+  };
+
   Coder.prototype.start = function (requirements) {
     this.threadId = null;
     this.streamEnded = false;
@@ -66,7 +98,12 @@
     this.submitBtn.textContent = "运行中…";
     var self = this;
     this.abortCtrl = new AbortController();
-    API.streamSSE("/sdlc/stream", { requirements: requirements }, {
+    var payload = { requirements: requirements };
+    // Send the selected coder model only when non-empty. Empty happens
+    // when the dropdown failed to load — backend then uses router default.
+    var sel = (this.modelSelect && this.modelSelect.value) || "";
+    if (sel) payload.coder_model = sel;
+    API.streamSSE("/sdlc/stream", payload, {
       signal: this.abortCtrl.signal,
       onMessage: function (m) { self.handleEvent(m); },
       onError: function (msg) {

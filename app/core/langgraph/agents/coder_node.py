@@ -508,7 +508,12 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
         # Layer 1: Tool selection — registry replaces 14 string-key lookups.
         file_tools = ctx.registry.get_for_agent("coder")
 
-        llm_with_tools = ctx.llm_service.get_llm_for(ctx.model_router.get_model_for("coder")).bind_tools(file_tools)
+        # Per-task coder model override (SDLC coder model selection feature).
+        # state["coder_model"] is set by the API layer from SDLCRequest.coder_model
+        # and persisted in the checkpoint, so reject->rerun keeps the same model.
+        # None => fall back to the router default (qwen3-coder-plus).
+        model_name = state.get("coder_model") or ctx.model_router.get_model_for("coder")
+        llm_with_tools = ctx.llm_service.get_llm_for(model_name).bind_tools(file_tools)
 
         try:
             thread_id = config.get("configurable", {}).get("thread_id", "default")

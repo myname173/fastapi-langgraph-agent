@@ -22,6 +22,7 @@ from app.models.session import Session
 from app.models.sdlc_task import SDLCTask
 from app.schemas.sdlc import SDLCReplayResponse, SDLCRequest, SDLCResponse
 from app.services.approval_log_service import approval_log_service
+from app.services.llm.router import model_router
 from app.services.sdlc_task_service import sdlc_task_service
 from app.utils.errors import safe_500, safe_stream_error
 
@@ -54,6 +55,18 @@ async def sdlc_orchestrate(
     session: Session = Depends(get_current_session),
 ):
     """Orchestrate an SDLC workflow using multi-agent system."""
+    # Validate user-selected coder model BEFORE entering the try block so
+    # HTTPException(400) propagates to FastAPI's exception handler instead
+    # of being caught by the generic 'except Exception' below (which wraps
+    # everything in safe_500 -> 500, masking the intended 400). coder_node
+    # calls get_llm_for(model_name) with NO fallback, so an unregistered
+    # name must be rejected at the API boundary.
+    if sdlc_request.coder_model and sdlc_request.coder_model not in settings.CODER_ELIGIBLE_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"coder_model 不在可选列表内: {sdlc_request.coder_model}",
+        )
+
     try:
         # L-3 fix: generate a unique thread_id per orchestration call so
         # concurrent tasks in the same session don't share/overwrite
@@ -72,6 +85,7 @@ async def sdlc_orchestrate(
             user_id=str(session.user_id),
             project_context=sdlc_request.project_context,
             images=sdlc_request.images,
+            coder_model=sdlc_request.coder_model,
         )
 
         last_message = ""
@@ -112,6 +126,15 @@ async def sdlc_orchestrate_stream(
 
     Streams events in real-time as the workflow progresses through each agent.
     """
+    # Validate coder_model BEFORE starting the SSE stream so an invalid
+    # name returns HTTP 400 immediately (matching POST /). Validating
+    # inside stream_response() would yield a 200 + SSE error event,
+    # which the UI handles less gracefully.
+    if sdlc_request.coder_model and sdlc_request.coder_model not in settings.CODER_ELIGIBLE_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"coder_model 不在可选列表内: {sdlc_request.coder_model}",
+        )
 
     async def stream_response():
         try:
@@ -136,6 +159,7 @@ async def sdlc_orchestrate_stream(
                 user_id=str(session.user_id),
                 project_context=sdlc_request.project_context,
                 images=sdlc_request.images,
+                coder_model=sdlc_request.coder_model,
             ):
                 yield f"data: {json.dumps(event, default=_json_default)}\n\n"
 
@@ -210,6 +234,26 @@ async def sdlc_get_feature_flags(
     except Exception as e:
         logger.exception("sdlc_feature_flags_failed", error=str(e))
         raise safe_500(e, context="sdlc_get_feature_flags")
+
+
+@router.get("/models")
+@limiter.limit("30 per minute")
+async def sdlc_get_models(
+    request: Request,
+    session: Session = Depends(get_current_session),
+):
+    """List LLM models the user may select for the coder agent.
+
+    Returns the CODER_ELIGIBLE_MODELS list (validated at config load
+    time) plus the router default so the UI can mark the default
+    option. The coder_node consumes SDLCRequest.coder_model directly
+    with no fallback, so every entry here MUST be resolvable by
+    LLMRegistry.get() at runtime.
+    """
+    return {
+        "models": list(settings.CODER_ELIGIBLE_MODELS),
+        "default": model_router.get_model_for("coder"),
+    }
 
 
 @router.post("/{thread_id}/approve", response_model=SDLCResponse)

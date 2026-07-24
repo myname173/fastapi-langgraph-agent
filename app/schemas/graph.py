@@ -1,6 +1,6 @@
 """This file contains the graph schema for the application."""
 
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Literal, Optional, TypedDict
 
 from langgraph.graph.message import add_messages
 from operator import add
@@ -48,3 +48,7 @@ class SDLCState(TypedDict):
     validation_results: Annotated[list[dict], replace_list_reducer]
     coder_retry_count: int
     reviewer_retry_count: int
+
+    # User-selected coder model (per-task). None = use router default.
+    # Persisted in checkpoint so reject->rerun keeps the same model.
+    coder_model: Optional[str]
