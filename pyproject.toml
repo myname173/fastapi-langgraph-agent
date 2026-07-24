@@ -66,7 +66,7 @@ cache = []
 # mcp independently (its own Dockerfile, starlette 1.x is fine there since
 # no FastAPI is present). Install with: uv sync --extra mcp.
 mcp = [
-    "mcp>=1.2.0",
+    "mcp>=1.27.2,<1.28",  # pin: uv.lock-verified; 1.28+ may break FastMCP/transport API
     "langchain-mcp-adapters>=0.1.0",
     "starlette>=0.27,<1.0",
 ]

@@ -16,7 +16,7 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir "mcp>=1.2.0"
+    && pip install --no-cache-dir "mcp>=1.27.2,<1.28"
 
 # Copy the server package.
 COPY mcp_server/ ./mcp_server/
