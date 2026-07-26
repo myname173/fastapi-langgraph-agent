@@ -6,7 +6,7 @@ separate from the chatbot endpoints.
 
 import json
 import uuid
-from typing import Any, Literal, cast
+from typing import Any, Literal, Mapping, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -19,7 +19,7 @@ from app.core.limiter import limiter
 from app.core.logging import logger
 from app.models.approval_log import ApprovalAction, ApprovalLog, ApprovalStep
 from app.models.session import Session
-from app.models.sdlc_task import SDLCTask
+from app.models.sdlc_task import SDLCTask, SDLCTaskStatus
 from app.schemas.sdlc import SDLCReplayResponse, SDLCRequest, SDLCResponse
 from app.services.approval_log_service import approval_log_service
 from app.services.llm.router import model_router
@@ -45,6 +45,25 @@ def _json_default(obj: object) -> object:
     if hasattr(obj, "dict"):
         return cast(Any, obj).dict()
     return str(obj)
+
+
+async def _persist_task_outcome(thread_id: str, state: Mapping[str, Any]) -> None:
+    """Best-effort mirror of SDLCState status + plan into the SDLCTask row.
+
+    The LangGraph checkpoint remains the source of truth; SDLCTask is a
+    queryable index for GET /tasks. Swallows DB errors so a persistence
+    hiccup never breaks the workflow response (the row already exists
+    from create_task at orchestrate/stream start).
+    """
+    try:
+        status_str = state.get("status")
+        if status_str:
+            await sdlc_task_service.update_task_status(thread_id, SDLCTaskStatus(status_str))
+        plan = state.get("plan")
+        if plan:
+            await sdlc_task_service.update_task_plan(thread_id, json.dumps(plan))
+    except Exception as e:
+        logger.warning("sdlc_task_persist_failed", thread_id=thread_id, error=str(e))
 
 
 @router.post("/", response_model=SDLCResponse)
@@ -79,6 +98,22 @@ async def sdlc_orchestrate(
             requirements_length=len(sdlc_request.requirements),
         )
 
+        # Wire SDLCTask persistence (previously dead code: create_task
+        # was never called, so /tasks always returned an empty list).
+        # task_id == thread_id matches the approval_log convention.
+        # quota overflow raises ValueError -> isolated here as 429 so
+        # SDLCResponse ValidationError (also a ValueError subclass)
+        # is not misclassified as a quota error by the outer handler.
+        try:
+            await sdlc_task_service.create_task(
+                task_id=thread_id,
+                thread_id=thread_id,
+                user_id=session.user_id,
+                requirements=sdlc_request.requirements,
+            )
+        except ValueError as ve:
+            raise HTTPException(status_code=429, detail=str(ve))
+
         response = await orchestrator.get_response(
             requirements=sdlc_request.requirements,
             session_id=thread_id,
@@ -87,6 +122,11 @@ async def sdlc_orchestrate(
             images=sdlc_request.images,
             coder_model=sdlc_request.coder_model,
         )
+
+        # Best-effort mirror SDLCState status + plan into SDLCTask.
+        # Failures here must not break the response (checkpoint is the
+        # source of truth); _persist_task_outcome logs and swallows.
+        await _persist_task_outcome(thread_id, response)
 
         last_message = ""
         messages = response["messages"]
@@ -110,6 +150,13 @@ async def sdlc_orchestrate(
             thread_id=thread_id,
         )
 
+    except HTTPException:
+        # Re-raise HTTPException (e.g. the 429 quota error raised by
+        # create_task above) so it is not wrapped as safe_500 by the
+        # generic handler below. SDLCResponse ValidationError (a
+        # ValueError subclass) is NOT caught here — it falls through
+        # to except Exception -> safe_500, which is the correct 500.
+        raise
     except Exception as e:
         logger.exception("sdlc_request_failed", session_id=session.id, error=str(e))
         raise safe_500(e, context="sdlc_orchestrate")
@@ -153,6 +200,21 @@ async def sdlc_orchestrate_stream(
             # workflow events arrive.
             yield f"data: {json.dumps({'event': 'thread_started', 'data': {'thread_id': thread_id}})}\n\n"
 
+            # Wire SDLCTask persistence (previously dead code). On quota
+            # overflow, yield a clear error event and stop — do NOT run the
+            # workflow without a task row (that would re-create the empty
+            # /tasks bug). task_id == thread_id per approval_log convention.
+            try:
+                await sdlc_task_service.create_task(
+                    task_id=thread_id,
+                    thread_id=thread_id,
+                    user_id=session.user_id,
+                    requirements=sdlc_request.requirements,
+                )
+            except ValueError as ve:
+                yield f"data: {json.dumps({'event': 'error', 'data': {'error': str(ve)}})}\n\n"
+                return
+
             async for event in orchestrator.stream_events(
                 requirements=sdlc_request.requirements,
                 session_id=thread_id,
@@ -162,6 +224,12 @@ async def sdlc_orchestrate_stream(
                 coder_model=sdlc_request.coder_model,
             ):
                 yield f"data: {json.dumps(event, default=_json_default)}\n\n"
+
+            # Stream ended (normal completion / approval_needed / error all
+            # return inside stream_events, so the async-for always ends
+            # cleanly). Mirror the final checkpoint state into SDLCTask.
+            final_state = await orchestrator.get_state(session_id=thread_id)
+            await _persist_task_outcome(thread_id, final_state)
 
         except Exception as e:
             # C-9 fix: never leak raw str(e) to the client — it can
@@ -269,6 +337,10 @@ async def sdlc_approve(
 
         response = await orchestrator.approve_task(session_id=thread_id)
 
+        # Mirror the resumed workflow status into SDLCTask (best-effort).
+        # The task row was created when the original /stream run started.
+        await _persist_task_outcome(thread_id, response)
+
         await approval_log_service.log_approval(
             task_id=thread_id,
             step=ApprovalStep.REVIEWER,
@@ -323,6 +395,9 @@ async def sdlc_reject(
         )
 
         response = await orchestrator.reject_task(session_id=thread_id, reason=reason)
+
+        # Mirror the resumed workflow status into SDLCTask (best-effort).
+        await _persist_task_outcome(thread_id, response)
 
         await approval_log_service.log_approval(
             task_id=thread_id,

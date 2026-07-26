@@ -11,6 +11,8 @@ ASGI app wiring (middleware, routing, exception handlers).
 
 from unittest.mock import AsyncMock, patch
 
+from app.models.sdlc_task import SDLCTaskStatus
+
 
 class TestRootEndpoint:
     """Tests for GET /api/info."""
@@ -152,8 +154,16 @@ class TestSDLCModelSelection:
             "is_complete": False,
             "human_approval_needed": False,
         }
-        with patch("app.api.v1.sdlc.orchestrator") as mock_orch:
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+        ):
             mock_orch.get_response = AsyncMock(return_value=fake_state)
+            # create_task is now wired into POST /; mock it so the test
+            # does not hit the (unconfigured) DB via sdlc_task_service.
+            mock_task.create_task = AsyncMock(return_value=None)
+            mock_task.update_task_status = AsyncMock()
+            mock_task.update_task_plan = AsyncMock()
             response = await async_client.post(
                 "/api/v1/sdlc/",
                 headers=auth_headers,
@@ -188,8 +198,14 @@ class TestSDLCModelSelection:
             "is_complete": False,
             "human_approval_needed": False,
         }
-        with patch("app.api.v1.sdlc.orchestrator") as mock_orch:
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+        ):
             mock_orch.get_response = AsyncMock(return_value=fake_state)
+            mock_task.create_task = AsyncMock(return_value=None)
+            mock_task.update_task_status = AsyncMock()
+            mock_task.update_task_plan = AsyncMock()
             response = await async_client.post(
                 "/api/v1/sdlc/",
                 headers=auth_headers,
@@ -216,3 +232,150 @@ class TestSDLCModelSelection:
         assert response.status_code == 400, response.text
         assert "coder_model" in response.json()["detail"]
         mock_orch.stream_events.assert_not_called()
+
+
+class TestSDLCTaskPersistence:
+    """Tests for SDLCTask write-path wiring (previously dead code).
+
+    Covers the 4 lifecycle hooks: POST /, POST /stream, approve, reject.
+    Verifies create_task is called, status is mirrored, quota overflow
+    surfaces as 429, and persistence failures are best-effort.
+    """
+
+    def _auth_setup(self, mock_db, make_fake_session, thread_id):
+        """Configure mock_db so get_current_session succeeds for thread_id."""
+        fake_session = make_fake_session(session_id=thread_id, user_id=1)
+        mock_db.get_session.return_value = fake_session
+        return fake_session
+
+    @staticmethod
+    def _fake_state(status: str = "completed", is_complete: bool = True, plan: list | None = None) -> dict:
+        """Minimal valid SDLCState dict for SDLCResponse construction."""
+        return {
+            "messages": [],
+            "status": status,
+            "plan": plan if plan is not None else [],
+            "code_changes": [],
+            "test_results": [],
+            "feedback": [],
+            "security_issues": [],
+            "is_complete": is_complete,
+            "human_approval_needed": False,
+        }
+
+    async def test_create_task_called_on_orchestrate(
+        self, async_client, auth_headers, mock_db, make_fake_session, thread_id
+    ):
+        """POST /sdlc/ creates an SDLCTask row and mirrors completion status + plan."""
+        self._auth_setup(mock_db, make_fake_session, thread_id)
+        fake_state = self._fake_state(
+            status="completed", is_complete=True, plan=[{"id": "step-1", "description": "test step"}]
+        )
+
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+        ):
+            mock_orch.get_response = AsyncMock(return_value=fake_state)
+            mock_task.create_task = AsyncMock(return_value=None)
+            mock_task.update_task_status = AsyncMock()
+            mock_task.update_task_plan = AsyncMock()
+            response = await async_client.post("/api/v1/sdlc/", headers=auth_headers, json={"requirements": "test"})
+
+        assert response.status_code == 200, response.text
+        # create_task called with task_id == thread_id (uuid generated internally),
+        # matching the approval_log convention.
+        _, kwargs = mock_task.create_task.call_args
+        assert kwargs["task_id"] == kwargs["thread_id"]
+        assert kwargs["user_id"] == 1
+        assert kwargs["requirements"] == "test"
+        # Status mirrored to COMPLETED and plan persisted (best-effort).
+        task_id = kwargs["task_id"]
+        mock_task.update_task_status.assert_awaited_once_with(task_id, SDLCTaskStatus("completed"))
+        mock_task.update_task_plan.assert_awaited_once()
+
+    async def test_quota_exceeded_returns_429(self, async_client, auth_headers, mock_db, make_fake_session, thread_id):
+        """create_task quota overflow surfaces as 429 (not 500) and skips the workflow."""
+        self._auth_setup(mock_db, make_fake_session, thread_id)
+
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+        ):
+            mock_task.create_task = AsyncMock(
+                side_effect=ValueError("User 1 has reached the maximum of 20 active tasks")
+            )
+            response = await async_client.post("/api/v1/sdlc/", headers=auth_headers, json={"requirements": "test"})
+
+        assert response.status_code == 429, response.text
+        assert "maximum of 20 active tasks" in response.json()["detail"]
+        # Workflow must NOT run when the task row could not be created.
+        mock_orch.get_response.assert_not_called()
+
+    async def test_stream_creates_and_persists_task(
+        self, async_client, auth_headers, mock_db, make_fake_session, thread_id
+    ):
+        """POST /sdlc/stream creates a task at start and mirrors final state at end."""
+        self._auth_setup(mock_db, make_fake_session, thread_id)
+        fake_state = self._fake_state(status="completed", is_complete=True)
+
+        async def _fake_stream(*args, **kwargs):
+            yield {"event": "on_chain_end", "data": {}}
+
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+        ):
+            mock_orch.stream_events = _fake_stream
+            mock_orch.get_state = AsyncMock(return_value=fake_state)
+            mock_task.create_task = AsyncMock(return_value=None)
+            mock_task.update_task_status = AsyncMock()
+            mock_task.update_task_plan = AsyncMock()
+            response = await async_client.post(
+                "/api/v1/sdlc/stream", headers=auth_headers, json={"requirements": "test"}
+            )
+
+        assert response.status_code == 200, response.text
+        mock_task.create_task.assert_awaited_once()
+        _, kwargs = mock_task.create_task.call_args
+        assert kwargs["task_id"] == kwargs["thread_id"]
+        # Final checkpoint state mirrored via get_state -> update_task_status.
+        mock_task.update_task_status.assert_awaited_once_with(kwargs["task_id"], SDLCTaskStatus("completed"))
+
+    async def test_persist_failure_does_not_break_request(
+        self, async_client, auth_headers, mock_db, make_fake_session, thread_id
+    ):
+        """If update_task_status raises, the POST / response still succeeds (best-effort)."""
+        self._auth_setup(mock_db, make_fake_session, thread_id)
+        fake_state = self._fake_state(status="completed", is_complete=True)
+
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+        ):
+            mock_orch.get_response = AsyncMock(return_value=fake_state)
+            mock_task.create_task = AsyncMock(return_value=None)
+            mock_task.update_task_status = AsyncMock(side_effect=RuntimeError("db down"))
+            mock_task.update_task_plan = AsyncMock()
+            response = await async_client.post("/api/v1/sdlc/", headers=auth_headers, json={"requirements": "test"})
+
+        assert response.status_code == 200, response.text
+
+    async def test_approve_mirrors_status(self, async_client, auth_headers, mock_db, make_fake_session, thread_id):
+        """POST /{thread_id}/approve mirrors the resumed status into SDLCTask."""
+        self._auth_setup(mock_db, make_fake_session, thread_id)
+        fake_state = self._fake_state(status="completed", is_complete=True)
+
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+            patch("app.api.v1.sdlc.approval_log_service") as mock_log,
+        ):
+            mock_orch.approve_task = AsyncMock(return_value=fake_state)
+            mock_task.update_task_status = AsyncMock()
+            mock_task.update_task_plan = AsyncMock()
+            mock_log.log_approval = AsyncMock()
+            response = await async_client.post("/api/v1/sdlc/%s/approve" % thread_id, headers=auth_headers)
+
+        assert response.status_code == 200, response.text
+        mock_task.update_task_status.assert_awaited_once_with(thread_id, SDLCTaskStatus("completed"))
