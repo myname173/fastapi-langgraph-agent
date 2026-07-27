@@ -379,3 +379,88 @@ class TestSDLCTaskPersistence:
 
         assert response.status_code == 200, response.text
         mock_task.update_task_status.assert_awaited_once_with(thread_id, SDLCTaskStatus("completed"))
+
+
+class TestSDLCGoalContext:
+    """Tests for Goal context injection into SDLC workflow."""
+
+    def _auth_setup(self, mock_db, make_fake_session, thread_id):
+        """Configure mock_db so get_current_session succeeds for thread_id."""
+        fake_session = make_fake_session(session_id=thread_id, user_id=1)
+        mock_db.get_session.return_value = fake_session
+        return fake_session
+
+    @staticmethod
+    def _fake_state(status: str = "completed", is_complete: bool = True, plan: list | None = None) -> dict:
+        """Minimal valid SDLCState dict for SDLCResponse construction."""
+        return {
+            "messages": [],
+            "status": status,
+            "plan": plan if plan is not None else [],
+            "code_changes": [],
+            "test_results": [],
+            "feedback": [],
+            "security_issues": [],
+            "is_complete": is_complete,
+            "human_approval_needed": False,
+        }
+
+    async def test_sdlc_with_goal_id_injects_context(
+        self, async_client, auth_headers, mock_db, make_fake_session, thread_id
+    ):
+        """POST /sdlc/ with goal_id injects historical context into project_context."""
+        self._auth_setup(mock_db, make_fake_session, thread_id)
+        fake_state = self._fake_state()
+
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+            patch("app.api.v1.sdlc.goal_service") as mock_goal,
+        ):
+            mock_orch.get_response = AsyncMock(return_value=fake_state)
+            mock_task.create_task = AsyncMock(return_value=None)
+            mock_task.update_task_status = AsyncMock()
+            mock_task.update_task_plan = AsyncMock()
+            mock_goal.build_context = AsyncMock(return_value="# Goal: Test\n\nHistorical context here")
+
+            response = await async_client.post(
+                "/api/v1/sdlc/",
+                headers=auth_headers,
+                json={"requirements": "new feature", "goal_id": "goal-123"},
+            )
+
+        assert response.status_code == 200, response.text
+        mock_goal.build_context.assert_called_once_with("goal-123", 1)
+        call_kwargs = mock_orch.get_response.call_args.kwargs
+        assert "Historical context here" in call_kwargs["project_context"]
+        # create_task should also receive goal_id
+        mock_task.create_task.assert_called_once()
+        assert mock_task.create_task.call_args.kwargs.get("goal_id") == "goal-123"
+
+    async def test_sdlc_without_goal_id_backward_compatible(
+        self, async_client, auth_headers, mock_db, make_fake_session, thread_id
+    ):
+        """POST /sdlc/ without goal_id does not call build_context (backward compat)."""
+        self._auth_setup(mock_db, make_fake_session, thread_id)
+        fake_state = self._fake_state()
+
+        with (
+            patch("app.api.v1.sdlc.orchestrator") as mock_orch,
+            patch("app.api.v1.sdlc.sdlc_task_service") as mock_task,
+            patch("app.api.v1.sdlc.goal_service") as mock_goal,
+        ):
+            mock_orch.get_response = AsyncMock(return_value=fake_state)
+            mock_task.create_task = AsyncMock(return_value=None)
+            mock_task.update_task_status = AsyncMock()
+            mock_task.update_task_plan = AsyncMock()
+
+            response = await async_client.post(
+                "/api/v1/sdlc/",
+                headers=auth_headers,
+                json={"requirements": "simple task"},
+            )
+
+        assert response.status_code == 200, response.text
+        mock_goal.build_context.assert_not_called()
+        call_kwargs = mock_orch.get_response.call_args.kwargs
+        assert call_kwargs["project_context"] is None

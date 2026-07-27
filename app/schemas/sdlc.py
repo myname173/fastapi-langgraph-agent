@@ -157,6 +157,7 @@ class SDLCRequest(BaseModel):
     coder_model: Optional[str] = Field(
         None, description="用户指定的 coder 模型（须在 GET /sdlc/models 返回的可选列表内）"
     )
+    goal_id: Optional[str] = Field(None, description="关联的 Goal ID，用于跨会话上下文回灌")
 
 
 class SDLCResponse(BaseModel):

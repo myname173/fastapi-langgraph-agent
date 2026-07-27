@@ -25,7 +25,9 @@ class SDLCTaskService:
     # Sync DB blocks (private) — dispatched off-loop via run_in_thread
     # ------------------------------------------------------------------
 
-    def _create_task_sync(self, task_id: str, thread_id: str, user_id: Optional[int], requirements: str) -> SDLCTask:
+    def _create_task_sync(
+        self, task_id: str, thread_id: str, user_id: Optional[int], requirements: str, goal_id: Optional[str] = None
+    ) -> SDLCTask:
         def _block(session: Session) -> SDLCTask:
             task = SDLCTask(
                 id=task_id,
@@ -33,6 +35,7 @@ class SDLCTaskService:
                 user_id=user_id,
                 status=SDLCTaskStatus.PLANNING,
                 requirements=requirements,
+                goal_id=goal_id,
             )
             session.add(task)
             session.commit()
@@ -108,6 +111,24 @@ class SDLCTaskService:
 
         return database_service.run_in_session(_block, op="sdlc_update_task_plan")
 
+    def _update_task_goal_sync(self, task_id: str, goal_id: Optional[str]) -> Optional[SDLCTask]:
+        """Sync: associate or dissociate a task with a Goal."""
+
+        def _block(session: Session) -> Optional[SDLCTask]:
+            result = session.exec(select(SDLCTask).where(SDLCTask.id == task_id))
+            task = result.first()
+            if not task:
+                logger.warning("sdlc_task_not_found", task_id=task_id)
+                return None
+            task.goal_id = goal_id
+            task.updated_at = datetime.now(UTC)
+            session.commit()
+            session.refresh(task)
+            logger.info("sdlc_task_goal_updated", task_id=task_id, goal_id=goal_id)
+            return task
+
+        return database_service.run_in_session(_block, op="sdlc_update_task_goal")
+
     def _delete_task_sync(self, task_id: str) -> Optional[str]:
         """Delete a task row, returning its thread_id for resource cleanup.
 
@@ -137,7 +158,12 @@ class SDLCTaskService:
     # ------------------------------------------------------------------
 
     async def _create_task_async(
-        self, task_id: str, thread_id: str, user_id: Optional[int], requirements: str
+        self,
+        task_id: str,
+        thread_id: str,
+        user_id: Optional[int],
+        requirements: str,
+        goal_id: Optional[str] = None,
     ) -> SDLCTask:
         async with get_async_session_maker()() as session:
             task = SDLCTask(
@@ -146,6 +172,7 @@ class SDLCTaskService:
                 user_id=user_id,
                 status=SDLCTaskStatus.PLANNING,
                 requirements=requirements,
+                goal_id=goal_id,
             )
             session.add(task)
             await session.commit()
@@ -211,6 +238,21 @@ class SDLCTaskService:
             logger.info("sdlc_task_plan_updated", task_id=task_id)
             return task
 
+    async def _update_task_goal_async(self, task_id: str, goal_id: Optional[str]) -> Optional[SDLCTask]:
+        """Async: associate or dissociate a task with a Goal."""
+        async with get_async_session_maker()() as session:
+            result = await session.execute(select(SDLCTask).where(SDLCTask.id == task_id))
+            task = result.scalars().first()
+            if not task:
+                logger.warning("sdlc_task_not_found", task_id=task_id)
+                return None
+            task.goal_id = goal_id
+            task.updated_at = datetime.now(UTC)
+            await session.commit()
+            await session.refresh(task)
+            logger.info("sdlc_task_goal_updated", task_id=task_id, goal_id=goal_id)
+            return task
+
     async def _delete_task_async(self, task_id: str) -> Optional[str]:
         """Delete a task row, returning its thread_id for resource cleanup."""
         async with get_async_session_maker()() as session:
@@ -238,6 +280,7 @@ class SDLCTaskService:
         thread_id: str,
         user_id: Optional[int] = None,
         requirements: str = "",
+        goal_id: Optional[str] = None,
     ) -> SDLCTask:
         """Create a new SDLC task.
 
@@ -252,9 +295,9 @@ class SDLCTaskService:
         # at entry when over quota, preserving the old error contract.
         async with quota_service.reserve_task_slot(user_id):
             if settings.ENABLE_ASYNC_DB:
-                return await self._create_task_async(task_id, thread_id, user_id, requirements)
+                return await self._create_task_async(task_id, thread_id, user_id, requirements, goal_id)
             return await run_in_thread(
-                self._create_task_sync, task_id, thread_id, user_id, requirements, op="sdlc_create_task"
+                self._create_task_sync, task_id, thread_id, user_id, requirements, goal_id, op="sdlc_create_task"
             )
 
     async def get_task(self, task_id: str) -> Optional[SDLCTask]:
@@ -359,6 +402,17 @@ class SDLCTaskService:
         if settings.ENABLE_ASYNC_DB:
             return await self._update_task_plan_async(task_id, plan)
         return await run_in_thread(self._update_task_plan_sync, task_id, plan, op="sdlc_update_task_plan")
+
+    async def update_task_goal(self, task_id: str, goal_id: Optional[str]) -> Optional[SDLCTask]:
+        """Associate or dissociate a task with a Goal.
+
+        Args:
+            task_id: The SDLC task ID.
+            goal_id: The Goal ID to associate, or None to dissociate.
+        """
+        if settings.ENABLE_ASYNC_DB:
+            return await self._update_task_goal_async(task_id, goal_id)
+        return await run_in_thread(self._update_task_goal_sync, task_id, goal_id, op="sdlc_update_task_goal")
 
     async def cancel_task(self, task_id: str) -> Optional[SDLCTask]:
         """Cancel a task."""

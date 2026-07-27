@@ -23,6 +23,7 @@ from app.models.sdlc_task import SDLCTask, SDLCTaskStatus
 from app.schemas.sdlc import SDLCReplayResponse, SDLCRequest, SDLCResponse
 from app.services.approval_log_service import approval_log_service
 from app.services.llm.router import model_router
+from app.services.goal_service import goal_service
 from app.services.sdlc_task_service import sdlc_task_service
 from app.utils.errors import safe_500, safe_stream_error
 
@@ -104,12 +105,34 @@ async def sdlc_orchestrate(
         # quota overflow raises ValueError -> isolated here as 429 so
         # SDLCResponse ValidationError (also a ValueError subclass)
         # is not misclassified as a quota error by the outer handler.
+        # Goal context injection: if goal_id is provided, assemble historical
+        # context from the Goal's tasks and inject into project_context.
+        # This happens at the API layer — planner_node receives the context
+        # via project_context without any DB I/O in the graph.
+        project_context = sdlc_request.project_context
+        if sdlc_request.goal_id:
+            try:
+                goal_context = await goal_service.build_context(sdlc_request.goal_id, session.user_id)
+                if goal_context:
+                    if project_context:
+                        project_context = f"{project_context}\n\n---\n\n{goal_context}"
+                    else:
+                        project_context = goal_context
+                    logger.info(
+                        "goal_context_injected",
+                        goal_id=sdlc_request.goal_id,
+                        context_length=len(project_context),
+                    )
+            except Exception as e:
+                logger.warning("goal_context_build_failed", goal_id=sdlc_request.goal_id, error=str(e))
+
         try:
             await sdlc_task_service.create_task(
                 task_id=thread_id,
                 thread_id=thread_id,
                 user_id=session.user_id,
                 requirements=sdlc_request.requirements,
+                goal_id=sdlc_request.goal_id,
             )
         except ValueError as ve:
             raise HTTPException(status_code=429, detail=str(ve))
@@ -118,7 +141,7 @@ async def sdlc_orchestrate(
             requirements=sdlc_request.requirements,
             session_id=thread_id,
             user_id=str(session.user_id),
-            project_context=sdlc_request.project_context,
+            project_context=project_context,
             images=sdlc_request.images,
             coder_model=sdlc_request.coder_model,
         )
@@ -204,12 +227,31 @@ async def sdlc_orchestrate_stream(
             # overflow, yield a clear error event and stop — do NOT run the
             # workflow without a task row (that would re-create the empty
             # /tasks bug). task_id == thread_id per approval_log convention.
+            # Goal context injection (same as POST /).
+            project_context = sdlc_request.project_context
+            if sdlc_request.goal_id:
+                try:
+                    goal_context = await goal_service.build_context(sdlc_request.goal_id, session.user_id)
+                    if goal_context:
+                        if project_context:
+                            project_context = f"{project_context}\n\n---\n\n{goal_context}"
+                        else:
+                            project_context = goal_context
+                        logger.info(
+                            "goal_context_injected",
+                            goal_id=sdlc_request.goal_id,
+                            context_length=len(project_context),
+                        )
+                except Exception as e:
+                    logger.warning("goal_context_build_failed", goal_id=sdlc_request.goal_id, error=str(e))
+
             try:
                 await sdlc_task_service.create_task(
                     task_id=thread_id,
                     thread_id=thread_id,
                     user_id=session.user_id,
                     requirements=sdlc_request.requirements,
+                    goal_id=sdlc_request.goal_id,
                 )
             except ValueError as ve:
                 yield f"data: {json.dumps({'event': 'error', 'data': {'error': str(ve)}})}\n\n"
@@ -219,7 +261,7 @@ async def sdlc_orchestrate_stream(
                 requirements=sdlc_request.requirements,
                 session_id=thread_id,
                 user_id=str(session.user_id),
-                project_context=sdlc_request.project_context,
+                project_context=project_context,
                 images=sdlc_request.images,
                 coder_model=sdlc_request.coder_model,
             ):

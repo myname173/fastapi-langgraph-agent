@@ -32,6 +32,7 @@ class SDLCTask(SQLModel, table=True):
         created_at: When the task was created
         updated_at: When the task was last updated
         completed_at: When the task was completed (optional)
+        goal_id: Optional association to a Goal (cross-session grouping)
     """
 
     # NOTE: explicit __tablename__ is REQUIRED because the alembic migration
@@ -50,3 +51,4 @@ class SDLCTask(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: Optional[datetime] = Field(default=None)
+    goal_id: Optional[str] = Field(default=None, index=True)

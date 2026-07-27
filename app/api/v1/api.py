@@ -8,6 +8,7 @@ from fastapi import APIRouter
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.chatbot import router as chatbot_router
+from app.api.v1.goals import router as goals_router
 from app.api.v1.media import router as media_router
 from app.api.v1.sdlc import router as sdlc_router
 from app.core.config import settings
@@ -20,6 +21,7 @@ api_router.include_router(auth_router, prefix="/auth", tags=["Auth"])
 api_router.include_router(chatbot_router, prefix="/chatbot", tags=["Chatbot"])
 api_router.include_router(sdlc_router, prefix="/sdlc", tags=["SDLC Orchestrator"])
 api_router.include_router(media_router, prefix="/media", tags=["Media Generation"])
+api_router.include_router(goals_router, prefix="/goals", tags=["Goals"])
 
 # WebSocket router for real-time SDLC interaction (approve/reject/status).
 # Opt-in via ENABLE_WEBSOCKET Feature Flag (default false). When disabled,
