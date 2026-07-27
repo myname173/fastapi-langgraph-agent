@@ -43,6 +43,19 @@ FAKE_MODEL = "test-deterministic-embedder-v1"
 
 TEST_USER_ID = 990001
 
+
+@pytest.fixture(autouse=True)
+def _enable_kb_at_runtime(monkeypatch):
+    """Patch settings.ENABLE_KNOWLEDGE_BASE=True so the route handler does not 404.
+
+    The conftest autouse _enforce_test_settings fixture sets
+    ENABLE_KNOWLEDGE_BASE=False for safety; this overrides it to True for KB
+    tests. The route itself is registered at import time via the env var set
+    in conftest.
+    """
+    monkeypatch.setattr(settings, "ENABLE_KNOWLEDGE_BASE", True)
+
+
 # --- deterministic local embedder (no external dependency) -----------------
 
 

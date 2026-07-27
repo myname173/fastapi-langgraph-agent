@@ -7,6 +7,7 @@ configuration value parsing.
 
 import json
 import os
+import tempfile
 from enum import Enum
 from pathlib import Path
 
@@ -512,7 +513,7 @@ class Settings:
         self.LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "7"))
 
         # Profiling Configuration (DEBUG only)
-        self.PROFILING_DIR = Path(os.getenv("PROFILING_DIR", "/tmp/fastapi_profiles"))
+        self.PROFILING_DIR = Path(os.getenv("PROFILING_DIR", os.path.join(tempfile.gettempdir(), "fastapi_profiles")))
         self.PROFILING_THRESHOLD_SECONDS = float(os.getenv("PROFILING_THRESHOLD_SECONDS", "2.0"))
 
         # Postgres Configuration

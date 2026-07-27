@@ -30,6 +30,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # ---------------------------------------------------------------------------
 os.environ["APP_ENV"] = "test"
 
+# Force DEBUG=false before any app import — prevents ProfilingMiddleware from
+# being added (it writes to PROFILING_DIR which defaults to /tmp, incompatible
+# with Windows where C:\\tmp requires admin to create). Also register KB routes
+# at import time so test_knowledge_base_search can exercise them; the autouse
+# _enforce_test_settings fixture still patches settings.ENABLE_KNOWLEDGE_BASE
+# =False at runtime for tests that don't opt in.
+os.environ["DEBUG"] = "false"
+os.environ.setdefault("ENABLE_KNOWLEDGE_BASE", "true")
+
 # Layer 2 (defense in depth): Override critical secrets with test-only
 # values via ``setdefault`` so we don't clobber values already set by the
 # test runner, but ensure non-empty test values exist if .env.test is absent.
