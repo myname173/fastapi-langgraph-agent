@@ -27,7 +27,7 @@ from app.services.goal_service import goal_service
 from app.services.sdlc_task_service import sdlc_task_service
 from app.utils.errors import safe_500, safe_stream_error
 
-SDLCStatus = Literal["planning", "coding", "testing", "reviewing", "completed"]
+SDLCStatus = Literal["specing", "planning", "coding", "testing", "reviewing", "completed"]
 
 router = APIRouter()
 orchestrator = SupervisorGraph()
@@ -55,6 +55,12 @@ async def _persist_task_outcome(thread_id: str, state: Mapping[str, Any]) -> Non
     queryable index for GET /tasks. Swallows DB errors so a persistence
     hiccup never breaks the workflow response (the row already exists
     from create_task at orchestrate/stream start).
+
+    Also backfills the associated Goal's description with the PO agent's
+    ``problem_statement`` and ``success_metrics`` when the task has a
+    ``goal_id`` and the spec is not a fallback placeholder. This keeps
+    the Goal (business half) in sync with the spec-driven development
+    output without introducing DB I/O in graph nodes.
     """
     try:
         status_str = state.get("status")
@@ -63,6 +69,35 @@ async def _persist_task_outcome(thread_id: str, state: Mapping[str, Any]) -> Non
         plan = state.get("plan")
         if plan:
             await sdlc_task_service.update_task_plan(thread_id, json.dumps(plan))
+
+        # Phase 4: Backfill Goal with PO's spec (problem_statement + success_metrics).
+        # Only fires when product_spec is a real spec (not fallback) and the
+        # task is associated with a Goal. This is the API-layer counterpart
+        # to the PO node — graph nodes stay pure (no DB I/O).
+        product_spec = state.get("product_spec", [])
+        if product_spec and not product_spec[0].get("fallback"):
+            spec = product_spec[0]
+            problem = spec.get("problem_statement", "")
+            metrics = spec.get("success_metrics", [])
+            if problem or metrics:
+                task = await sdlc_task_service.get_task(thread_id)
+                if task and task.goal_id:
+                    context_parts = []
+                    if problem:
+                        context_parts.append(f"Problem: {problem}")
+                    if metrics:
+                        context_parts.append("Success Metrics: " + "; ".join(metrics))
+                    if context_parts:
+                        await goal_service.update_goal(
+                            goal_id=task.goal_id,
+                            description="\n".join(context_parts),
+                        )
+                        logger.info(
+                            "goal_spec_backfilled",
+                            goal_id=task.goal_id,
+                            thread_id=thread_id,
+                            metrics_count=len(metrics),
+                        )
     except Exception as e:
         logger.warning("sdlc_task_persist_failed", thread_id=thread_id, error=str(e))
 

@@ -10,6 +10,7 @@ from sqlmodel import Field, SQLModel
 class SDLCTaskStatus(str, Enum):
     """SDLC task status enumeration."""
 
+    SPECING = "specing"
     PLANNING = "planning"
     CODING = "coding"
     TESTING = "testing"
