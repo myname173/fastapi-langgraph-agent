@@ -10,9 +10,15 @@ Or from host (requires app listening on localhost:8000):
     .venv\\Scripts\\python.exe scripts\\e2e_goal_test.py
 """
 
+import os
+import sys
 import uuid
 
 import httpx
+
+# Ensure the project root (/app or host project dir) is on sys.path so that
+# ``from app.core.db.session import ...`` works when running from scripts/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 BASE = "http://localhost:8000/api/v1"
 TIMEOUT = 180
