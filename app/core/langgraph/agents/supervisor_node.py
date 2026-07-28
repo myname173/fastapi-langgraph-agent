@@ -44,6 +44,12 @@ def make_supervisor_node(ctx: AgentContext) -> NodeCallable:
         test_results = state.get("test_results", []) or []
         feedback = state.get("feedback", []) or []
         human_approval_needed = state.get("human_approval_needed", False)
+        # PO agent's structured spec — empty until po_node runs.
+        # _force_route uses (requirements && !product_spec) → po to enforce
+        # the specing phase before planning. A fallback entry
+        # {"fallback": True, ...} (written by po_node on failure) counts as
+        # "present" so the guard advances to planner with raw requirements.
+        product_spec = state.get("product_spec", []) or []
 
         # ------------------------------------------------------------------
         # C-7 + H-3 fix: human-in-the-loop approval gate. Both coder_node
@@ -110,17 +116,28 @@ def make_supervisor_node(ctx: AgentContext) -> NodeCallable:
         # The supervisor LLM occasionally returns is_complete=True on a fresh
         # task, which would terminate the workflow with no plan/code/output.
         # These guards force the canonical SDLC order regardless of LLM output:
-        #   requirements → planner → coder → tester → reviewer → completed
+        #   requirements → po → planner → coder → tester → reviewer → completed
         # ------------------------------------------------------------------
         def _force_route() -> Command | None:
             # Block premature completion: a task is only eligible to end when
             # every stage has produced tangible output.
             if human_approval_needed:
                 return None  # approval gating handled below
-            if requirements.strip() and not plan:
+            # PO guard: requirements exist but no spec yet → produce spec first.
+            # A fallback entry ({"fallback": True, ...}) counts as "present"
+            # so PO failure does not dead-loop here.
+            if requirements.strip() and not product_spec:
+                logger.warning(
+                    "sdlc_supervisor_guard_force_po",
+                    reason="requirements_present_spec_empty",
+                )
+                return Command(update={"status": "specing"}, goto="po")
+            # Planner guard: spec exists but no plan → plan from spec.
+            # Falls through to coder guard when plan is already present.
+            if product_spec and not plan:
                 logger.warning(
                     "sdlc_supervisor_guard_force_planner",
-                    reason="requirements_present_plan_empty",
+                    reason="spec_present_plan_empty",
                 )
                 return Command(update={"status": "planning"}, goto="planner")
             if plan and not code_changes:
@@ -193,6 +210,7 @@ def make_supervisor_node(ctx: AgentContext) -> NodeCallable:
         system_prompt = load_agent_prompt(
             "supervisor",
             requirements=requirements,
+            product_spec=product_spec,
             plan=plan,
             code_changes=code_changes,
             test_results=test_results,

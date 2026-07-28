@@ -10,6 +10,7 @@ from app.schemas.chat import (
 )
 from app.schemas.graph import GraphState, SDLCState
 from app.schemas.sdlc import (
+    AcceptanceCriterion,
     CoderOutput,
     CoderPlanStep,
     CodeEdit,
@@ -17,6 +18,7 @@ from app.schemas.sdlc import (
     FileChange,
     ImageAnalysisResult,
     PlannerOutput,
+    ProductSpec,
     ReviewerOutput,
     SecurityIssue,
     SupervisorDecision,
@@ -48,6 +50,8 @@ __all__ = [
     "CoderOutput",
     "TesterOutput",
     "ReviewerOutput",
+    "AcceptanceCriterion",
+    "ProductSpec",
     "SDLCRequest",
     "SDLCResponse",
     "ImageAnalysisResult",

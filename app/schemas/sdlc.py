@@ -98,7 +98,9 @@ class FeedbackItem(BaseModel):
 class SupervisorDecision(BaseModel):
     """Structured output for supervisor routing decisions."""
 
-    next_agent: Literal["planner", "coder", "reviewer", "tester", "END"] = Field(..., description="下一个要调用的代理")
+    next_agent: Literal["po", "planner", "coder", "reviewer", "tester", "END"] = Field(
+        ..., description="下一个要调用的代理"
+    )
     reasoning: str = Field(..., description="决策理由")
     status_update: Optional[str] = Field(None, description="状态更新信息")
     is_complete: bool = Field(default=False, description="流程是否完成")
@@ -148,6 +150,61 @@ class ReviewerOutput(BaseModel):
     summary: str = Field(default="", description="审查摘要")
 
 
+class AcceptanceCriterion(BaseModel):
+    """Single Given-When-Then acceptance criterion produced by the PO agent.
+
+    Mirrors the EARS-grammar + Given-When-Then pattern from the Agentic SDLC
+    PO persona reference. These become the source-of-truth inputs for the
+    tester agent (test derivation) and reviewer agent (acceptance gating).
+    """
+
+    scenario: str = Field(..., description="场景描述")
+    given: str = Field(..., description="前置条件 (Given)")
+    when: str = Field(..., description="触发动作 (When)")
+    then: str = Field(..., description="预期结果 (Then)")
+
+
+class ProductSpec(BaseModel):
+    """Structured output for the PO (Product Owner) agent.
+
+    Implements the spec-driven development pattern: the PO produces a
+    structured spec that becomes the programmatic interface consumed by
+    downstream engineering agents (planner/tester/reviewer).
+
+    All fields use base JSON-serializable types so the model can be stored
+    in SDLCState and checkpointed by AsyncPostgresSaver.
+
+    Field alignment with the 3 external references (MetaGPT / Agentic SDLC
+    PO Persona / IdeaPlan AI SDLC 2026):
+      - problem_statement: WHY / outcome hypothesis
+      - success_metrics: measurable ROI / value signal (feeds Goal layer)
+      - in_scope / out_of_scope: scope boundary + low-value interception
+      - acceptance_criteria: Given-When-Then → tester/reviewer source
+      - mvp_recommendation: minimal viable slice
+      - open_questions / needs_clarification: ambiguity gate
+      - low_value_rationale: explicit low-ROI flag (Phase 4 enables gate)
+    """
+
+    summary: str = Field(default="", description="一句话目标")
+    problem_statement: str = Field(default="", description="WHY：成果假设 / outcome hypothesis")
+    target_users: List[str] = Field(default_factory=list, description="目标用户")
+    success_metrics: List[str] = Field(default_factory=list, description="可衡量成功指标 / ROI 依据")
+    in_scope: List[str] = Field(default_factory=list, description="范围内")
+    out_of_scope: List[str] = Field(default_factory=list, description="范围外")
+    assumptions: List[str] = Field(default_factory=list, description="假设")
+    risks: List[str] = Field(default_factory=list, description="风险")
+    acceptance_criteria: List[AcceptanceCriterion] = Field(
+        default_factory=list, description="Given-When-Then 验收标准（tester/reviewer 输入）"
+    )
+    mvp_recommendation: str = Field(default="", description="建议的最小可交付切片")
+    open_questions: List[str] = Field(default_factory=list, description="需用户澄清的问题")
+    needs_clarification: bool = Field(
+        default=False,
+        description="是否需用户澄清（第一版不启用审批闸，prompt 强制返回 False）",
+    )
+    low_value_rationale: Optional[str] = Field(None, description="若判定低 ROI，给原因；非空时阶段 4 触发审批闸")
+
+
 class SDLCRequest(BaseModel):
     """Request model for SDLC Orchestrator API."""
 
@@ -163,7 +220,9 @@ class SDLCRequest(BaseModel):
 class SDLCResponse(BaseModel):
     """Response model for SDLC Orchestrator API."""
 
-    status: Literal["planning", "coding", "testing", "reviewing", "completed"] = Field(..., description="当前阶段状态")
+    status: Literal["specing", "planning", "coding", "testing", "reviewing", "completed"] = Field(
+        ..., description="当前阶段状态"
+    )
     plan: List[Task] = Field(default_factory=list, description="执行计划")
     code_changes: List[FileChange] = Field(default_factory=list, description="代码变更")
     test_results: List[TestResult] = Field(default_factory=list, description="测试结果")

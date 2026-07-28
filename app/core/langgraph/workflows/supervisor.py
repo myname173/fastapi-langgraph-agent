@@ -39,6 +39,7 @@ from app.core.langgraph.agents import (
     build_default_context,
     make_coder_node,
     make_planner_node,
+    make_po_node,
     make_reviewer_node,
     make_supervisor_node,
     make_tester_node,
@@ -89,6 +90,10 @@ class SupervisorGraph:
                     wrap_node_with_handoff("supervisor", make_supervisor_node(self._ctx)),
                 )
                 graph_builder.add_node(
+                    "po",
+                    wrap_node_with_handoff("po", make_po_node(self._ctx)),
+                )
+                graph_builder.add_node(
                     "planner",
                     wrap_node_with_handoff("planner", make_planner_node(self._ctx)),
                 )
@@ -107,6 +112,7 @@ class SupervisorGraph:
 
                 graph_builder.set_entry_point("supervisor")
 
+                graph_builder.add_edge("po", "supervisor")
                 graph_builder.add_edge("planner", "supervisor")
                 graph_builder.add_edge("coder", "supervisor")
                 graph_builder.add_edge("reviewer", "supervisor")
@@ -179,6 +185,9 @@ class SupervisorGraph:
                 "requirements": requirements,
                 "project_context": project_context,
                 "user_id": user_id,
+                # PO agent's structured spec — empty until po_node runs.
+                # _force_route guard uses (requirements && !product_spec) → po.
+                "product_spec": [],
                 "plan": [],
                 "code_changes": [],
                 "test_results": [],

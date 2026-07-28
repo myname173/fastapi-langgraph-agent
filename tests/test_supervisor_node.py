@@ -38,11 +38,19 @@ def _build_ctx(llm_response: Any = None, llm_exc: Exception | None = None) -> Ag
 
 
 def _base_state(**overrides: Any) -> dict[str, Any]:
-    """Minimal SDLCState for supervisor input."""
+    """Minimal SDLCState for supervisor input.
+
+    Includes ``product_spec`` with a fallback marker so the PO guard in
+    ``_force_route`` (requirements && !product_spec → po) does not fire
+    for tests that exercise downstream stages (planner/coder/tester/
+    reviewer). Tests that need to exercise the PO guard explicitly can
+    override ``product_spec=[]``.
+    """
     state: dict[str, Any] = {
         "messages": [{"role": "user", "content": "build it"}],
         "status": "coding",
         "requirements": "build it",
+        "product_spec": [{"fallback": True, "summary": "PO unavailable"}],
         "plan": [],
         "code_changes": [],
         "test_results": [],
@@ -273,3 +281,80 @@ class TestSupervisorModelRouter:
             await node(_base_state(), _config())
 
         ctx.model_router.get_model_for_call.assert_called_once_with("supervisor")
+
+
+class TestSupervisorPOGuard:
+    """Tests for the PO (Product Owner) hard guard in _force_route.
+
+    The guard enforces: requirements → po → planner → coder → …
+    When requirements exist but product_spec is empty, the supervisor
+    must route to po regardless of LLM output (defends against premature
+    completion). A fallback entry counts as "present" so PO failure does
+    not dead-loop.
+    """
+
+    async def test_requirements_no_spec_forces_po(self):
+        """Requirements present + product_spec empty → Command(goto='po')."""
+        decision = SupervisorDecision(next_agent="END", reasoning="done", is_complete=True)
+        ctx = _build_ctx(llm_response=decision)
+        node = make_supervisor_node(ctx)
+
+        state = _base_state(product_spec=[])  # explicitly empty spec
+
+        with (
+            patch("app.core.langgraph.agents.supervisor_node.load_agent_prompt", return_value="sys"),
+            patch("app.core.langgraph.agents.supervisor_node.prepare_sdlc_messages", return_value=[]),
+            patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
+        ):
+            result = await node(state, _config())
+
+        # Even though LLM said is_complete=True, the guard overrides → po
+        assert result.goto == "po"
+        assert result.update["status"] == "specing"
+
+    async def test_fallback_spec_advances_to_planner(self):
+        """Fallback spec (PO failed) + no plan → Command(goto='planner').
+
+        This verifies the dead-loop prevention: PO failure writes a
+        {"fallback": True, ...} entry, which counts as "present" so the
+        guard does not re-route to po, but advances to planner with raw
+        requirements.
+        """
+        decision = SupervisorDecision(next_agent="END", reasoning="done", is_complete=True)
+        ctx = _build_ctx(llm_response=decision)
+        node = make_supervisor_node(ctx)
+
+        # _base_state already includes fallback spec; plan is empty
+        state = _base_state()
+
+        with (
+            patch("app.core.langgraph.agents.supervisor_node.load_agent_prompt", return_value="sys"),
+            patch("app.core.langgraph.agents.supervisor_node.prepare_sdlc_messages", return_value=[]),
+            patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
+        ):
+            result = await node(state, _config())
+
+        # Guard overrides is_complete → planner (spec present, plan empty)
+        assert result.goto == "planner"
+        assert result.update["status"] == "planning"
+
+    async def test_real_spec_no_plan_forces_planner(self):
+        """Real spec (non-fallback) + no plan → Command(goto='planner')."""
+        decision = SupervisorDecision(next_agent="END", reasoning="done", is_complete=True)
+        ctx = _build_ctx(llm_response=decision)
+        node = make_supervisor_node(ctx)
+
+        state = _base_state(
+            product_spec=[{"summary": "real spec", "acceptance_criteria": []}],
+            plan=[],
+        )
+
+        with (
+            patch("app.core.langgraph.agents.supervisor_node.load_agent_prompt", return_value="sys"),
+            patch("app.core.langgraph.agents.supervisor_node.prepare_sdlc_messages", return_value=[]),
+            patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
+        ):
+            result = await node(state, _config())
+
+        assert result.goto == "planner"
+        assert result.update["status"] == "planning"

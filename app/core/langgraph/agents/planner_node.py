@@ -25,6 +25,7 @@ def make_planner_node(ctx: AgentContext) -> NodeCallable:
             "planner",
             requirements=state.get("requirements", ""),
             long_term_memory=state.get("long_term_memory", ""),
+            product_spec=state.get("product_spec", []),
             image_contexts=state.get("image_contexts", []),
         )
         messages = prepare_sdlc_messages(state["messages"], system_prompt)

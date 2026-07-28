@@ -9,6 +9,7 @@ Node modules
 ------------
 
 - :mod:`supervisor_node` — top-level coordinator / router
+- :mod:`po_node` — Product Owner: produces structured ProductSpec before planning
 - :mod:`planner_node` — generates structured task plan
 - :mod:`coder_node` — writes/edits code with file tools (largest node)
 - :mod:`tester_node` — executes tests and reports results
@@ -18,6 +19,7 @@ Node modules
 from app.core.langgraph.agents.context import AgentContext, build_default_context
 from app.core.langgraph.agents.coder_node import make_coder_node
 from app.core.langgraph.agents.planner_node import make_planner_node
+from app.core.langgraph.agents.po_node import make_po_node
 from app.core.langgraph.agents.reviewer_node import make_reviewer_node
 from app.core.langgraph.agents.supervisor_node import NodeCallable, make_supervisor_node
 from app.core.langgraph.agents.tester_node import make_tester_node
@@ -28,6 +30,7 @@ __all__ = [
     "build_default_context",
     "make_coder_node",
     "make_planner_node",
+    "make_po_node",
     "make_reviewer_node",
     "make_supervisor_node",
     "make_tester_node",

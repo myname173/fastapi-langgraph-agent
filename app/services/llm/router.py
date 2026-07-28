@@ -14,6 +14,12 @@ Hybrid routing table (local vLLM + cloud DashScope):
                                               routing decision; 0.5B model
                                               tested but cannot understand
                                               multi-field SDLC state
+    po              qwen3.7-max-preview heavy   Product Owner: WHY/ROI/MVP
+                                              reasoning + structured spec
+                                              with Given-When-Then ACs.
+                                              Same tier as planner — both
+                                              need strong reasoning for
+                                              downstream agent consumption.
     planner         qwen3.7-max-preview heavy   Complex planning
     coder           qwen3-coder-plus   coding   Coding specialist
     tester          qwen3.7-plus       medium   Test execution
@@ -62,6 +68,7 @@ from app.services.llm.registry import LLMRegistry
 # because 0.5B cannot understand multi-field SDLC state.
 ROUTING_TABLE: dict[str, str] = {
     "supervisor": "qwen3.7-plus",
+    "po": "qwen3.7-max-preview",
     "planner": "qwen3.7-max-preview",
     "coder": "qwen3-coder-plus",
     "tester": "qwen3.7-plus",
@@ -99,8 +106,9 @@ class ModelRouter:
         in the routing table.
 
         Args:
-            agent_role: One of ``"supervisor"``, ``"planner"``, ``"coder"``,
-                ``"tester"``, ``"reviewer"``, ``"session_naming"``, ``"chat"``.
+            agent_role: One of ``"supervisor"``, ``"po"``, ``"planner"``,
+                ``"coder"``, ``"tester"``, ``"reviewer"``, ``"session_naming"``,
+                ``"chat"``.
 
         Returns:
             Model name string suitable for ``LLMService.call(model_name=...)``
