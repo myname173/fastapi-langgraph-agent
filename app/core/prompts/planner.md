@@ -40,6 +40,25 @@ If a Product Spec is provided below (non-empty and not a fallback marker):
 If the Product Spec is empty or contains a `fallback: true` marker, ignore
 it and plan directly from `Requirements` (legacy behaviour).
 
+## Technical Feasibility Assessment (IMPORTANT)
+Before producing the plan, assess whether the requirements are technically
+feasible given the project's current architecture, dependencies, and
+constraints. Set `feasibility` to `"blocked"` when:
+- An external dependency is unavailable or incompatible (e.g., API down,
+  library version conflict)
+- The requirement demands a breaking change to a core module without a
+  safe migration path
+- The platform or runtime cannot support the requested feature
+- The scope is too ambiguous to determine a concrete technical approach
+
+When `feasibility` is `"blocked"`, set `feasibility_rationale` to a clear
+explanation of the blocker and a recommended next step. Do NOT produce a
+plan in this case — return an empty plan list. The workflow will pause for
+human approval before any code is written.
+
+When `feasibility` is `"feasible"`, set `feasibility_rationale` to a brief
+technical approach summary (1-2 sentences) and produce the plan normally.
+
 ## Input
 Requirements: {requirements}
 Long-Term Memory: {long_term_memory}
@@ -55,7 +74,9 @@ DO NOT INCLUDE ANY EXPLANATION, COMMENT, OR MARKDOWN CODE BLOCK.
         {{"id": "task-1", "description": "Analyze requirements and design architecture", "status": "pending", "assignee": "planner"}},
         {{"id": "task-2", "description": "Implement core module", "status": "pending", "assignee": "coder"}}
     ],
-    "summary": "Plan summary..."
+    "summary": "Plan summary...",
+    "feasibility": "feasible",
+    "feasibility_rationale": "Technical approach: add a FastAPI endpoint with SQLAlchemy ORM..."
 }}
 
 Current date and time: {current_date_and_time}

@@ -161,6 +161,53 @@ class TestPlannerNodeFailure:
         assert "bad response" in assistant_msg["content"]
 
 
+class TestPlannerFeasibilityGate:
+    """Tests for the technical feasibility gate (feasibility field)."""
+
+    async def test_blocked_sets_human_approval_needed(self):
+        """When feasibility=='blocked', human_approval_needed is set to True."""
+        plan = PlannerOutput(
+            plan=[],
+            summary="blocked",
+            feasibility="blocked",
+            feasibility_rationale="External API unavailable; no fallback path.",
+        )
+        ctx = _build_ctx(llm_response=plan)
+        node = make_planner_node(ctx)
+
+        with (
+            patch("app.core.langgraph.agents.planner_node.load_agent_prompt", return_value="sys"),
+            patch("app.core.langgraph.agents.planner_node.prepare_sdlc_messages", return_value=[]),
+            patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
+        ):
+            result = await node(_base_state())
+
+        assert result.goto == "supervisor"
+        assert result.update["human_approval_needed"] is True
+        assert result.update["plan"] == []
+
+    async def test_feasible_does_not_set_approval(self):
+        """When feasibility=='feasible', human_approval_needed is not set."""
+        plan = PlannerOutput(
+            plan=[Task(id="t1", description="step 1")],
+            summary="ok",
+            feasibility="feasible",
+            feasibility_rationale="Standard FastAPI endpoint addition.",
+        )
+        ctx = _build_ctx(llm_response=plan)
+        node = make_planner_node(ctx)
+
+        with (
+            patch("app.core.langgraph.agents.planner_node.load_agent_prompt", return_value="sys"),
+            patch("app.core.langgraph.agents.planner_node.prepare_sdlc_messages", return_value=[]),
+            patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
+        ):
+            result = await node(_base_state())
+
+        assert result.update.get("human_approval_needed", False) is False
+        assert len(result.update["plan"]) == 1
+
+
 class TestPlannerNodeContextPropagation:
     """Tests verifying set_llm_context wraps the LLM call."""
 

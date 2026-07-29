@@ -34,14 +34,30 @@ def make_planner_node(ctx: AgentContext) -> NodeCallable:
             response = await call_llm_structured(ctx, "planner", "planning", messages, PlannerOutput)
 
             plan_data = [task.model_dump() for task in response.plan] if response.plan else []
-            logger.info("sdlc_planner_completed", plan_task_count=len(plan_data))
+            logger.info(
+                "sdlc_planner_completed",
+                plan_task_count=len(plan_data),
+                feasibility=response.feasibility,
+            )
+
+            # Technical feasibility gate: if planner determines the task is
+            # technically blocked, pause for human approval before coding.
+            # Reuses the same human_approval_needed mechanism as PO/reviewer.
+            update_dict: dict = {
+                "messages": [{"role": "assistant", "content": response.summary}],
+                "plan": plan_data,
+                "status": "planning",
+            }
+
+            if response.feasibility == "blocked":
+                update_dict["human_approval_needed"] = True
+                logger.info(
+                    "planner_feasibility_blocked",
+                    rationale=response.feasibility_rationale[:200],
+                )
 
             return Command(
-                update={
-                    "messages": [{"role": "assistant", "content": response.summary}],
-                    "plan": plan_data,
-                    "status": "planning",
-                },
+                update=update_dict,
                 goto="supervisor",
             )
         except Exception as e:

@@ -111,6 +111,14 @@ class PlannerOutput(BaseModel):
 
     plan: List[Task] = Field(default_factory=list, description="执行计划任务列表")
     summary: str = Field(default="", description="计划摘要")
+    feasibility: Literal["feasible", "blocked"] = Field(
+        default="feasible",
+        description="技术可行性评估结果。blocked 表示存在技术阻碍（如外部依赖不可用、破坏性变更风险、平台限制等）",
+    )
+    feasibility_rationale: str = Field(
+        default="",
+        description="可行性评估理由。feasible 时简述技术路径；blocked 时详述阻碍原因和建议",
+    )
 
 
 class CoderOutput(BaseModel):
