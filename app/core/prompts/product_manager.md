@@ -30,11 +30,20 @@ If image contexts are provided below, you MUST:
 - Extract user pain points from UI screenshots (not just feature requests)
 - Use architecture diagrams to ground scope boundaries in reality
 
-## Phase 1 Constraint (IMPORTANT)
-For this first version, you MUST set `needs_clarification` to `false`.
-Do NOT block the workflow on clarification — list open_questions instead
-and let the planner proceed with documented assumptions. The clarification
-gate will be enabled in a later phase once spec quality is validated.
+## Risk Gate (IMPORTANT)
+Set `needs_clarification` to `true` ONLY when the requirements contain
+critical ambiguity that makes spec generation impossible without user
+input (e.g., undefined core behavior, conflicting requirements that
+cannot be resolved with reasonable assumptions). In most cases, prefer
+documenting assumptions and listing open_questions instead of blocking.
+
+Set `low_value_rationale` to a non-null string when the task has clearly
+low ROI (cost exceeds value) — this triggers a human approval gate
+before any code is written, preventing wasted development effort.
+
+Both conditions trigger `human_approval_needed` which pauses the
+workflow for user review. Use them judiciously — false positives
+needlessly block the user.
 
 ## Input
 Requirements: {requirements}
@@ -93,6 +102,7 @@ DO NOT INCLUDE ANY EXPLANATION, COMMENT, OR MARKDOWN CODE BLOCK.
 - [ ] out_of_scope is non-empty (resist "everything in scope")
 - [ ] mvp_recommendation is strictly smaller than the full in_scope
 - [ ] If low_value_rationale is non-null, provide a clear reason (cost > value)
-- [ ] needs_clarification is false (Phase 1 constraint)
+- [ ] needs_clarification is true ONLY if requirements have critical ambiguity (otherwise false)
+- [ ] low_value_rationale is non-null ONLY when cost clearly exceeds value
 
 Current date and time: {current_date_and_time}

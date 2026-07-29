@@ -30,6 +30,7 @@ def make_reviewer_node(ctx: AgentContext) -> NodeCallable:
             code_changes=state.get("code_changes", []),
             test_results=state.get("test_results", []),
             image_contexts=state.get("image_contexts", []),
+            product_spec=state.get("product_spec", []),
         )
         messages = prepare_sdlc_messages(state["messages"], system_prompt)
 

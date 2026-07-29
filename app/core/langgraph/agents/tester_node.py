@@ -30,6 +30,7 @@ def make_tester_node(ctx: AgentContext) -> NodeCallable:
             requirements=state.get("requirements", ""),
             plan=state.get("plan", []),
             code_changes=state.get("code_changes", []),
+            product_spec=state.get("product_spec", []),
         )
         messages = prepare_sdlc_messages(state["messages"], system_prompt)
 

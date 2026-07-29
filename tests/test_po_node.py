@@ -243,3 +243,70 @@ class TestPONodeContextPropagation:
             await node(_base_state())
 
         assert captured == [("po", "specing")]
+
+
+class TestPONodeRiskGate:
+    """Tests for PO risk gate — human_approval_needed triggers."""
+
+    @staticmethod
+    def _spec_with_clarification() -> ProductSpec:
+        """Spec that flags needs_clarification=True."""
+        base = _sample_spec()
+        base.needs_clarification = True
+        base.open_questions = ["What authentication method is required?"]
+        return base
+
+    @staticmethod
+    def _spec_with_low_value() -> ProductSpec:
+        """Spec that flags low_value_rationale."""
+        base = _sample_spec()
+        base.low_value_rationale = "Task is trivial — a single print statement. Dev cost exceeds value."
+        return base
+
+    async def test_needs_clarification_triggers_approval_gate(self):
+        """needs_clarification=True → human_approval_needed set in update."""
+        ctx = _build_ctx(llm_response=self._spec_with_clarification())
+        node = make_po_node(ctx)
+
+        with (
+            patch("app.core.langgraph.agents.po_node.load_agent_prompt", return_value="sys"),
+            patch("app.core.langgraph.agents.po_node.prepare_sdlc_messages", return_value=[]),
+            patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
+        ):
+            result = await node(_base_state())
+
+        update = result.update
+        assert update.get("human_approval_needed") is True
+        assert update["product_spec"][0]["needs_clarification"] is True
+
+    async def test_low_value_rationale_triggers_approval_gate(self):
+        """low_value_rationale non-empty → human_approval_needed set in update."""
+        ctx = _build_ctx(llm_response=self._spec_with_low_value())
+        node = make_po_node(ctx)
+
+        with (
+            patch("app.core.langgraph.agents.po_node.load_agent_prompt", return_value="sys"),
+            patch("app.core.langgraph.agents.po_node.prepare_sdlc_messages", return_value=[]),
+            patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
+        ):
+            result = await node(_base_state())
+
+        update = result.update
+        assert update.get("human_approval_needed") is True
+        assert update["product_spec"][0]["low_value_rationale"] is not None
+
+    async def test_no_risk_flags_does_not_trigger_gate(self):
+        """needs_clarification=False + low_value_rationale=None → no approval gate."""
+        ctx = _build_ctx(llm_response=_sample_spec())
+        node = make_po_node(ctx)
+
+        with (
+            patch("app.core.langgraph.agents.po_node.load_agent_prompt", return_value="sys"),
+            patch("app.core.langgraph.agents.po_node.prepare_sdlc_messages", return_value=[]),
+            patch("app.core.langgraph.agents.context.dump_sdlc_messages", return_value="[]"),
+        ):
+            result = await node(_base_state())
+
+        update = result.update
+        assert "human_approval_needed" not in update or update.get("human_approval_needed") is False
+

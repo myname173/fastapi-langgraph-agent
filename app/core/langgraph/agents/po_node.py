@@ -68,12 +68,30 @@ def make_po_node(ctx: AgentContext) -> NodeCallable:
                 has_low_value_rationale=spec_data.get("low_value_rationale") is not None,
             )
 
+            # Risk gate: if PO flags needs_clarification or low_value_rationale,
+            # set human_approval_needed to pause workflow before coding starts.
+            # supervisor_node detects this flag and triggers langgraph_interrupt.
+            needs_clarification = spec_data.get("needs_clarification", False)
+            low_value = spec_data.get("low_value_rationale")
+            has_low_value = low_value is not None and str(low_value).strip() != ""
+
+            update_dict: dict = {
+                "messages": [{"role": "assistant", "content": response.summary or "Product spec generated."}],
+                "product_spec": [spec_data],
+                "status": "specing",
+            }
+
+            if needs_clarification or has_low_value:
+                update_dict["human_approval_needed"] = True
+                logger.info(
+                    "po_risk_gate_triggered",
+                    needs_clarification=needs_clarification,
+                    has_low_value=has_low_value,
+                    low_value_rationale=str(low_value)[:200] if low_value else None,
+                )
+
             return Command(
-                update={
-                    "messages": [{"role": "assistant", "content": response.summary or "Product spec generated."}],
-                    "product_spec": [spec_data],
-                    "status": "specing",
-                },
+                update=update_dict,
                 goto="supervisor",
             )
         except Exception as e:

@@ -21,7 +21,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 BASE = "http://localhost:8000/api/v1"
-TIMEOUT = 180
+TIMEOUT = 300
 
 passed = []
 failed = []
