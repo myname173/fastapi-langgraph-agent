@@ -285,7 +285,12 @@ def _build_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
 
     # -- Chat agent (LangGraphAgent) -------------------------------------
-    registry.register(duckduckgo_search_tool, agents={"chat"}, tags={"search", "web"})
+    registry.register(
+        duckduckgo_search_tool,
+        agents={"chat"},
+        requires={"ENABLE_WEB_SEARCH"},
+        tags={"search", "web"},
+    )
     registry.register(ask_human, agents={"chat"}, tags={"human_loop"})
 
     # -- Real-time market quote tool (chat agent) -----------------------

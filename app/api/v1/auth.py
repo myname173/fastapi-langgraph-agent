@@ -177,6 +177,11 @@ async def register_user(request: Request, user_data: UserCreate):
     Returns:
         UserResponse: The created user info
     """
+    if not settings.ALLOW_REGISTRATION:
+        raise HTTPException(
+            status_code=403,
+            detail="Registration is disabled. Contact the administrator for an account.",
+        )
     try:
         # Sanitize email
         sanitized_email = sanitize_email(user_data.email)

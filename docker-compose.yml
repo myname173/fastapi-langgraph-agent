@@ -7,7 +7,7 @@ services:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -23,7 +23,7 @@ services:
   valkey:
     image: valkey/valkey:8.1.6-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - valkey-data:/data
     healthcheck:
@@ -42,10 +42,11 @@ services:
       args:
         APP_ENV: ${APP_ENV:-production}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./app:/app/app
       - ./logs:/app/logs
+      - ./scripts:/app/scripts
     env_file:
       - .env.${APP_ENV:-production}
     # Docker secrets — real API key is mounted read-only at
@@ -85,7 +86,7 @@ services:
   prometheus:
     image: prom/prometheus:latest
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     command:
@@ -98,13 +99,13 @@ services:
   grafana:
     image: grafana/grafana:latest
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana-storage:/var/lib/grafana
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./grafana/dashboards/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=h0dg7WRQ7zfYBz5vh7ARZQ
       - GF_USERS_ALLOW_SIGN_UP=false
     networks:
       - monitoring
@@ -113,7 +114,7 @@ services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:rw
@@ -133,7 +134,7 @@ services:
       context: .
       dockerfile: Dockerfile.ui
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     environment:
       - UI_API_BASE_URL=http://app:8000
     volumes:
@@ -165,7 +166,7 @@ services:
     image: vllm/vllm-openai:v0.8.5
     init: true  # tini init process — reaps zombie children (fixes docker stop hang)
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     volumes:
       # Model weights pre-downloaded on host (container-internal download
       # fails due to proxy issues). Read-only mount for safety.
@@ -238,7 +239,7 @@ services:
       context: .
       dockerfile: mcp_server/Dockerfile
     ports:
-      - "8002:8002"
+      - "127.0.0.1:8002:8002"
     volumes:
       # Read-only workspace mount — git tools can observe but never mutate.
       # If ./workspace doesn't exist on host, docker creates an empty dir;
@@ -286,8 +287,9 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     profiles: ["tunnel"]
-    # 默认快速隧道模式；命名隧道请改为：tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    command: tunnel --url http://app:8000
+    # Quick tunnel mode (temporary, URL changes on restart).
+    # For persistent URL, switch to: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate --url http://app:8000
     depends_on:
       app:
         condition: service_healthy

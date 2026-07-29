@@ -338,6 +338,10 @@ class Settings:
         self.ENABLE_AUDIT_LOG = os.getenv("ENABLE_AUDIT_LOG", "true").lower() == "true"
         self.ENABLE_ADVANCED_MONITORING = os.getenv("ENABLE_ADVANCED_MONITORING", "true").lower() == "true"
 
+        # Registration control: when false, /register returns 403.
+        # New users are created via scripts/create_user.py (invite-only).
+        self.ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "true").lower() == "true"
+
         # Long term memory Configuration
         self.LONG_TERM_MEMORY_MODEL = os.getenv("LONG_TERM_MEMORY_MODEL", "gpt-5-nano")
         self.LONG_TERM_MEMORY_EMBEDDER_MODEL = os.getenv("LONG_TERM_MEMORY_EMBEDDER_MODEL", "text-embedding-3-small")
@@ -378,6 +382,10 @@ class Settings:
         # right now". Default true (low cost, no auth, no rate-limit issues
         # for individual use).
         self.ENABLE_REALTIME_QUOTES = os.getenv("ENABLE_REALTIME_QUOTES", "true").lower() == "true"
+        # DuckDuckGo web search tool for the chat agent. Disable when the
+        # container network cannot reach external HTTPS endpoints (TLS
+        # handshake failures cause 20s+ timeouts and 502 gateway errors).
+        self.ENABLE_WEB_SEARCH = os.getenv("ENABLE_WEB_SEARCH", "true").lower() == "true"
         # Comma-separated whitelist of allowed symbol prefixes. Restricts
         # the LLM from probing arbitrary tickers. A-share: sh/sz, HK: hk,
         # US: us, commodity: hf_, index: 1/2/0-prefix codes.
