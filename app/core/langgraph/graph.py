@@ -13,6 +13,7 @@ from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
     BaseMessage,
+    HumanMessage,
     ToolMessage,
     convert_to_openai_messages,
 )
@@ -45,8 +46,14 @@ from app.core.langgraph.tools import default_registry
 from app.core.logging import logger
 from app.core.metrics import llm_inference_duration_seconds
 from app.core.observability import langfuse_callback_handler
+from app.core.chat_intent import (
+    ChatIntent,
+    classify_chat_intent,
+)
 from app.core.prompts import load_system_prompt
 from app.core.task_manager import task_manager
+from app.services import finance_memory
+from app.services.risk_profile_service import risk_profile_service
 from app.schemas import (
     GraphState,
     Message,
@@ -62,6 +69,116 @@ from app.utils import (
     prepare_messages,
     process_llm_response,
 )
+
+
+def _extract_last_user_text(messages: list) -> str:
+    """Return the text of the most recent HumanMessage in the history.
+
+    Args:
+        messages: The chat message history (LangChain message objects).
+
+    Returns:
+        The latest user text, or an empty string if none is found.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return ""
+
+
+def _build_local_casual_messages(user_text: str) -> list:
+    """Build a minimal message set for the local 1.5B casual path.
+
+    The local model has a tiny 1536-token context, so we must NOT forward the
+    full conversation history or the long system prompt. We send a short,
+    friendly system prompt plus only the latest user message.
+
+    Args:
+        user_text: The latest user message text.
+
+    Returns:
+        A list of ``Message`` objects ready for ``dump_messages``.
+    """
+    return [
+        Message(
+            role="system",
+            content="你是友好、简洁、口语化的中文对话助手，回答尽量简短自然。",
+        ),
+        Message(role="user", content=user_text[:400]),
+    ]
+
+
+def _triggered_realtime_tools(messages: list) -> bool:
+    """Detect whether the most recent model decision used real-time tools.
+
+    Used to suppress semantic caching for answers derived from live market
+    data (so we never serve a stale quote from cache).
+
+    Args:
+        messages: The chat message history (LangChain message objects).
+
+    Returns:
+        True if the latest AIMessage issued a tool call whose name is in
+        ``settings.REALTIME_TOOL_NAMES``.
+    """
+    if not settings.REALTIME_TOOL_NAMES:
+        return False
+    realtime = set(settings.REALTIME_TOOL_NAMES)
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            tool_calls = getattr(msg, "tool_calls", None)
+            if tool_calls:
+                return any(isinstance(tc, dict) and tc.get("name") in realtime for tc in tool_calls)
+            # A pure-text AI turn with no tool calls -> no real-time data.
+            return False
+        if isinstance(msg, HumanMessage):
+            # Fresh user turn with no preceding tool usage.
+            return False
+    return False
+
+
+def _extract_symbol_from_tools(messages: list) -> tuple[str, str]:
+    """Find the first real-time tool call's ``symbol`` argument.
+
+    Args:
+        messages: The chat message history (LangChain message objects).
+
+    Returns:
+        Tuple ``(symbol, name)``; either may be empty if not found.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            for tc in getattr(msg, "tool_calls", []) or []:
+                if not isinstance(tc, dict):
+                    continue
+                args = tc.get("args") or {}
+                symbol = args.get("symbol")
+                if symbol:
+                    return str(symbol), str(args.get("name") or "")
+    return "", ""
+
+
+def _format_risk_profile(rp) -> str:
+    """Render a risk profile as bullet text for the system prompt.
+
+    Args:
+        rp: A ``RiskProfile`` instance.
+
+    Returns:
+        Multi-line summary string.
+    """
+    return (
+        "\n[用户风险画像]\n"
+        f"- 风险偏好：{rp.risk_tolerance.value}\n"
+        f"- 投资目标：{rp.investment_goals or '未设置'}\n"
+        f"- 投资周期：{rp.horizon or '未设置'}\n"
+        f"- 月均可投资：{rp.monthly_invest}\n"
+        f"- 经验：{rp.experience or '未设置'}"
+    )
 
 
 class LangGraphAgent:
@@ -118,24 +235,77 @@ class LangGraphAgent:
         username = config.get("metadata", {}).get("username")
         user_id = config.get("metadata", {}).get("user_id")
         thread_id = config.get("configurable", {}).get("thread_id")
+
+        # Inject the user's risk profile into the system prompt (P2), so the
+        # advisor tailors guidance. Only when enabled and a profile exists;
+        # failures are ignored so chat never breaks on a profile lookup.
+        long_term_memory = state["long_term_memory"]
+        if settings.ENABLE_RISK_PROFILE and user_id:
+            try:
+                _rp = await risk_profile_service.get(int(user_id))
+                if _rp:
+                    long_term_memory = (long_term_memory or "") + "\n" + _format_risk_profile(_rp)
+            except Exception:
+                pass
+
         SYSTEM_PROMPT = load_system_prompt(
             username=username,
-            long_term_memory=state["long_term_memory"],
+            long_term_memory=long_term_memory,
             vision_context=state.get("vision_context", ""),
         )
 
         # Prepare messages with system prompt
         messages = prepare_messages(state["messages"], SYSTEM_PROMPT)
 
+        # --- Chat model adaptation (per-turn routing) ---
+        # All flags default off, so with nothing enabled this block is a no-op
+        # and behaviour is identical to the original path.
+        model_kwargs: dict = {}
+        cacheable = True
+        call_model_name = None  # None -> resolves to DEFAULT_LLM_MODEL
+        if settings.ENABLE_CHAT_MODEL_ROUTING:
+            last_user_text = _extract_last_user_text(state["messages"])
+            intent = await classify_chat_intent(last_user_text)
+            if intent == ChatIntent.CASUAL and settings.ENABLE_LOCAL_CHAT_TIER:
+                # Short chit-chat -> local 1.5B (free, low latency). Use the
+                # minimal message set because the local model has a tiny ctx.
+                call_model_name = settings.LOCAL_CHAT_MODEL
+                model_kwargs = {"temperature": settings.CHAT_CASUAL_TEMPERATURE}
+                messages = _build_local_casual_messages(last_user_text)
+            else:
+                # analytical / tool_needed -> cloud heavy model. Keep the
+                # DEFAULT_LLM_MODEL (zero regression) but tune the budget:
+                # analytical reports can be long (quotes + fundamentals + news).
+                model_kwargs = {
+                    "temperature": settings.CHAT_ANALYTICAL_TEMPERATURE,
+                    "max_tokens": settings.CHAT_ANALYTICAL_MAX_TOKENS,
+                }
+                if settings.CHAT_ENABLED_REASONING:
+                    model_kwargs["reasoning"] = True
+            # Never cache answers derived from real-time market data, so a later
+            # identical query does not return a stale quote.
+            if _triggered_realtime_tools(state["messages"]):
+                cacheable = False
+                # Best-effort layered memory: remember symbols the user asks
+                # about, so the advisor "knows the user" across sessions.
+                if settings.ENABLE_FINANCIAL_MEMORY:
+                    _symbol, _name = _extract_symbol_from_tools(state["messages"])
+                    if _symbol:
+                        await finance_memory.remember_symbol_if_new(user_id, _symbol, _name)
+        # --- end adaptation ---
+
         try:
             # Use LLM service with automatic retries and circular fallback.
             # Enable semantic cache for chat — semantically similar user
-            # queries hit the cache without an LLM call.
-            with llm_inference_duration_seconds.labels(model=model_name).time():
+            # queries hit the cache without an LLM call (unless suppressed for
+            # real-time market data above).
+            with llm_inference_duration_seconds.labels(model=call_model_name or model_name).time():
                 response_message = await self.llm_service.call(
                     dump_messages(messages),
-                    cacheable=True,
+                    model_name=call_model_name,
+                    cacheable=cacheable,
                     cache_user_id=user_id,
+                    **model_kwargs,
                 )
 
             # Process response to handle structured content blocks
@@ -144,7 +314,7 @@ class LangGraphAgent:
             logger.info(
                 "llm_response_generated",
                 session_id=thread_id,
-                model=model_name,
+                model=call_model_name or model_name,
                 environment=settings.ENVIRONMENT.value,
             )
 

@@ -78,7 +78,7 @@ class MemoryService:
         await self._get_memory()
         logger.info("memory_service_initialized")
 
-    async def search(self, user_id: str | None, query: str) -> str:
+    async def search(self, user_id: str | None, query: str, filters: dict | None = None) -> str:
         """Search relevant memories for a user.
 
         Checks semantic cache first; on miss, queries mem0 and caches the
@@ -102,7 +102,10 @@ class MemoryService:
 
             async def _do_search() -> str:
                 memory = await self._get_memory()
-                results = await memory.search(user_id=str(user_id), query=query)
+                search_kwargs: dict = {"user_id": str(user_id), "query": query}
+                if filters:
+                    search_kwargs["filters"] = filters
+                results = await memory.search(**search_kwargs)
                 return "\n".join([f"* {r['memory']}" for r in results["results"]])
 
             async def _guarded_search() -> str:

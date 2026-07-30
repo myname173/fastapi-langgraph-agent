@@ -39,6 +39,20 @@ if settings.ENABLE_KNOWLEDGE_BASE:
 
     api_router.include_router(kb_router, prefix="/knowledge-base", tags=["Knowledge Base"])
 
+# Portfolio management for the chat stock-advisor.
+# Opt-in via ENABLE_PORTFOLIO Feature Flag (default false). When disabled,
+# endpoints are not registered.
+if settings.ENABLE_PORTFOLIO:
+    from app.api.v1.portfolio import router as portfolio_router
+
+    api_router.include_router(portfolio_router, prefix="/portfolio", tags=["Portfolio"])
+
+# Risk-profile for the chat stock-advisor (P2 personalisation).
+if settings.ENABLE_RISK_PROFILE:
+    from app.api.v1.risk_profile import router as risk_profile_router
+
+    api_router.include_router(risk_profile_router, prefix="/risk-profile", tags=["Risk Profile"])
+
 
 @api_router.get("/health")
 async def health_check():
