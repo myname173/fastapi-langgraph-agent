@@ -22,20 +22,16 @@ from app.core.langgraph.tools._finance_utils import (
 
 
 def _parse_news(payload: dict) -> list[dict]:
-    result = payload.get("result")
-    rows = []
-    if isinstance(result, dict):
-        rows = result.get("data") or []
-    elif isinstance(result, list):
-        rows = result
+    data = payload.get("data") or {}
+    rows = data.get("list") or []
     out = []
     for item in rows:
         if not isinstance(item, dict):
             continue
-        title = item.get("NEWS_TITLE") or item.get("TITLE") or ""
-        summary = item.get("SUMMARY") or item.get("CONTENT") or ""
-        date = item.get("PUBLISH_DATE") or item.get("DATE") or ""
-        src = item.get("SOURCE") or item.get("MEDIANAME") or ""
+        title = item.get("title") or item.get("title_ch") or ""
+        summary = item.get("summary") or ""
+        date = item.get("notice_date") or item.get("display_time") or ""
+        src = item.get("source_type") or ""
         out.append(
             {
                 "title": title,
@@ -68,13 +64,15 @@ async def fetch_news_sentiment(symbol: str, limit: int = 10) -> str:
     limit = max(1, min(int(limit), 30))
     secid = to_eastmoney_secid(symbol)
     code = secid.split(".")[-1]
+    # The legacy datacenter reportName (RPT_WEB_NEWS) was retired; the
+    # np-anotice-stock announcement endpoint is the current source.
     url = (
-        "https://datacenter-web.eastmoney.com/api/data/v1/get"
-        "?reportName=RPT_WEB_NEWS"
-        "&columns=NEWS_CODE,NEWS_TITLE,PUBLISH_DATE,SOURCE,SUMMARY"
-        f"&filter=(SECURITY_CODE%3D%22{quote(code)}%22)"
-        f"&pageSize={limit}&sortColumns=PUBLISH_DATE&sortTypes=-1"
-        "&source=WEB&client=WEB"
+        "https://np-anotice-stock.eastmoney.com/api/security/ann"
+        "?sr=-1&page_index=1"
+        f"&page_size={limit}"
+        "&ann_type=A&client_source=web"
+        f"&stock_list={quote(code)}"
+        "&f_node=0&s_node=0"
     )
     try:
         payload = await ahttp_get_json(url)

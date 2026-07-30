@@ -37,13 +37,8 @@ def _extract_valuation(realtime_quote: list) -> dict:
 
 
 def _extract_financials(payload: dict) -> dict:
-    result = payload.get("result")
-    data = {}
-    if isinstance(result, dict):
-        rows = result.get("data") or []
-        data = rows[0] if isinstance(rows, list) and rows else {}
-    elif isinstance(result, list):
-        data = result[0] if result else {}
+    rows = payload.get("data") or []
+    data = rows[0] if isinstance(rows, list) and rows else {}
 
     def g(*keys: str) -> Any:
         for k in keys:
@@ -55,8 +50,8 @@ def _extract_financials(payload: dict) -> dict:
         "report_date": g("REPORT_DATE", "DATE"),
         "eps": g("EPSJB", "BASIC_EPS", "EPS"),
         "roe": g("ROEJQ", "WEIGHTAVG_ROE", "ROE"),
-        "revenue": g("YYSR", "OPERATE_INCOME", "REVENUE"),
-        "net_profit": g("JLR", "PARENT_NETPROFIT", "NET_PROFIT"),
+        "revenue": g("TOTALOPERATEREVE", "YYSR", "OPERATE_INCOME"),
+        "net_profit": g("PARENTNETPROFIT", "JLR", "PARENT_NETPROFIT"),
         "gross_margin": g("XSMLL", "GROSS_MARGIN"),
         "net_margin": g("JLL", "NET_MARGIN"),
         "debt_ratio": g("ZCFZL", "DEBT_RATIO"),
@@ -90,6 +85,9 @@ async def fetch_fundamentals(symbol: str) -> str:
 
     gsym = to_gtimg_symbol(symbol)
     secid = to_eastmoney_secid(symbol)
+    # ZYZBAjaxNew expects an exchange-prefixed code (SH600519 / SZ000001).
+    _market, _code = secid.split(".", 1)
+    em_code = ("SH" if _market == "1" else "SZ") + _code
     lines = [f"## {symbol} 基本面与估值", ""]
 
     # Valuation via live quote (same source as fetch_realtime_quote).
@@ -113,14 +111,10 @@ async def fetch_fundamentals(symbol: str) -> str:
         logger.warning("fetch_fundamentals_quote_failed", symbol=symbol, error=str(e))
         lines.append("### 估值：暂不可用\n")
 
-    # Financials via Eastmoney F10 main-financials endpoint.
-    fin_url = (
-        "https://datacenter-web.eastmoney.com/api/data/v1/get"
-        "?reportName=RPT_F10_FN_MAINFINANCE"
-        "&columns=ALL"
-        f"&filter=(SECURITY_CODE%3D%22{secid.split('.')[-1]}%22)"
-        "&pageSize=1&sortColumns=REPORT_DATE&sortTypes=-1&source=WEB&client=WEB"
-    )
+    # Financials via Eastmoney F10 main-financials endpoint. The legacy
+    # datacenter reportName (RPT_F10_FN_MAINFINANCE) was retired; the
+    # PC_HSF10 ZYZBAjaxNew endpoint is the current source.
+    fin_url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=0&code={em_code}"
     try:
         payload = await ahttp_get_json(fin_url)
         fin = _extract_financials(payload)

@@ -20,15 +20,15 @@ from app.core.langgraph.tools._finance_utils import (
 KLINE_PERIODS = {"daily": "day", "weekly": "week", "monthly": "month"}
 
 
-def _parse_kline_payload(payload: dict) -> list[dict]:
+def _parse_kline_payload(payload: dict, gsym: str) -> list[dict]:
     data = payload.get("data") or {}
-    raw = data.get("kline") or data.get("qfqkline", {}).get("kline") or []
+    sym_data = data.get(gsym) or {}
+    raw = sym_data.get("qfqday") or sym_data.get("day") or []
     rows = []
     for item in raw:
-        parts = item.split(",")
-        if len(parts) < 6:
+        if not isinstance(item, list) or len(item) < 6:
             continue
-        date, _open, close, high, low, volume = parts[:6]
+        date, _open, close, high, low, volume = item[:6]
         try:
             rows.append(
                 {
@@ -40,7 +40,7 @@ def _parse_kline_payload(payload: dict) -> list[dict]:
                     "volume": float(volume),
                 }
             )
-        except ValueError:
+        except (ValueError, TypeError):
             continue
     return rows
 
@@ -66,10 +66,10 @@ async def fetch_kline(symbol: str, period: str = "daily", limit: int = 60) -> st
     period = period if period in KLINE_PERIODS else "daily"
     limit = max(5, min(int(limit), 240))
     gsym = to_gtimg_symbol(symbol)
-    url = f"https://web.ifzq.gtimg.cn/appstuff/app/fqkline/get?param={gsym},{KLINE_PERIODS[period]},,,{limit},qfq"
+    url = f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={gsym},{KLINE_PERIODS[period]},,,{limit},qfq"
     try:
         payload = await ahttp_get_json(url)
-        rows = _parse_kline_payload(payload)
+        rows = _parse_kline_payload(payload, gsym)
     except Exception as e:
         logger.warning("fetch_kline_failed", symbol=symbol, error=str(e))
         return f"⚠️ 获取 {symbol} K线失败：{e}"

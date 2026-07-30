@@ -45,54 +45,42 @@ def test_tools_disabled_by_default(monkeypatch):
 async def _fake_http(url: str):
     if "qt.gtimg" in url:
         return 'v_sh600519="1~贵州茅台~600519~1685.0~1680.0~1690.0~1680.0~1696.0~1680.0~12345"'
-    if "kline" in url:
+    if "ifzq" in url or "appstock" in url:
         return {
-            "code": 0,
             "data": {
-                "kline": [
-                    "2024-01-02,10,11,12,9,100",
-                    "2024-01-03,11,12,13,10,200",
-                    "2024-01-04,12,13,14,11,150",
-                    "2024-01-05,13,14,15,12,180",
-                    "2024-01-08,14,15,16,13,120",
-                ]
-            },
+                "sh600519": {
+                    "qfqday": [
+                        ["2024-01-02", "10", "11", "12", "9", "100"],
+                        ["2024-01-03", "11", "12", "13", "10", "200"],
+                        ["2024-01-04", "12", "13", "14", "11", "150"],
+                        ["2024-01-05", "13", "14", "15", "12", "180"],
+                        ["2024-01-08", "14", "15", "16", "13", "120"],
+                    ]
+                }
+            }
         }
-    if "RPT_WEB_NEWS" in url:
+    if "np-anotice-stock" in url:
         return {
-            "result": {
-                "data": [
-                    {
-                        "NEWS_TITLE": "公司营收大涨",
-                        "SUMMARY": "利好",
-                        "PUBLISH_DATE": "2024-01-05",
-                        "SOURCE": "东方财富",
-                    },
-                    {
-                        "NEWS_TITLE": "行业风险警示",
-                        "SUMMARY": "风险",
-                        "PUBLISH_DATE": "2024-01-04",
-                        "SOURCE": "同花顺",
-                    },
+            "data": {
+                "list": [
+                    {"title": "公司营收大涨", "notice_date": "2024-01-05", "source_type": "东方财富"},
+                    {"title": "行业风险警示", "notice_date": "2024-01-04", "source_type": "同花顺"},
                 ]
             }
         }
-    if "f10" in url or "datacenter" in url:
+    if "ZYZBAjaxNew" in url or "emweb" in url:
         return {
-            "result": {
-                "data": [
-                    {
-                        "REPORT_DATE": "2024-03-31",
-                        "EPSJB": 59.49,
-                        "ROEJQ": 9.5,
-                        "YYSR": 1234567,
-                        "JLR": 123456,
-                        "XSMLL": 91.0,
-                        "JLL": 50.0,
-                        "ZCFZL": 20.0,
-                    }
-                ]
-            }
+            "data": [
+                {
+                    "REPORT_DATE": "2024-03-31",
+                    "EPSJB": 59.49,
+                    "ROEJQ": 9.5,
+                    "TOTALOPERATEREVE": 1234567,
+                    "PARENTNETPROFIT": 123456,
+                    "XSMLL": 91.0,
+                    "ZCFZL": 20.0,
+                }
+            ]
         }
     return {}
 

@@ -28,7 +28,24 @@ _HTTP_HEADERS = {
 def _sync_get_json(url: str, timeout: int) -> Any:
     req = urllib.request.Request(url, headers=_HTTP_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        raw = resp.read()
+    # Tencent endpoints (gtimg) return GBK; Eastmoney returns UTF-8.
+    text: Optional[str] = None
+    for _enc in ("utf-8", "gbk"):
+        try:
+            text = raw.decode(_enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    # Most endpoints return JSON; the gtimg quote endpoint returns JS text
+    # (e.g. ``v_sh600519="..."``). Return the raw text on parse failure so
+    # callers that need the JS payload can split it themselves.
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return text
 
 
 async def ahttp_get_json(url: str, timeout: int = DEFAULT_TIMEOUT) -> Any:
