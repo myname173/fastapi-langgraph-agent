@@ -29,10 +29,14 @@ def _extract_valuation(realtime_quote: list) -> dict:
         except (IndexError, ValueError):
             return None
 
-    # Candidate field indices across quote variants for PE / PB.
+    # Tencent qt.gtimg.cn q= field layout (0-indexed, ~ separated):
+    #   [39] = 市盈率(动) PE-TTM, [46] = 市净率 PB.
+    # Earlier indices [38] (换手率) and [44]/[45] (流通/总市值, 亿元) are
+    # numerically valid but unrelated, so they must not be tried first —
+    # a non-zero turnover or market-cap value would shadow the real PE/PB.
     return {
-        "pe": num(38) or num(39),
-        "pb": num(44) or num(46),
+        "pe": num(39),
+        "pb": num(46),
     }
 
 

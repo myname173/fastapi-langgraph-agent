@@ -31,13 +31,17 @@ def _parse_news(payload: dict) -> list[dict]:
         title = item.get("title") or item.get("title_ch") or ""
         summary = item.get("summary") or ""
         date = item.get("notice_date") or item.get("display_time") or ""
-        src = item.get("source_type") or ""
+        # source_type is a market/board code (e.g. 31/331/333), not a media
+        # name. The announcement category in columns[0].column_name is the
+        # readable, useful signal (e.g. "调研活动", "回购预案").
+        cols = item.get("columns") or []
+        category = cols[0].get("column_name") if cols and isinstance(cols[0], dict) else ""
         out.append(
             {
                 "title": title,
                 "summary": summary,
                 "date": str(date)[:10],
-                "source": src,
+                "category": category or "公告",
                 "score": score_sentiment((title or "") + (summary or "")),
             }
         )
@@ -46,17 +50,18 @@ def _parse_news(payload: dict) -> list[dict]:
 
 @tool
 async def fetch_news_sentiment(symbol: str, limit: int = 10) -> str:
-    """获取个股近期新闻并做情绪评分（基本面/情绪面分析的输入）.
+    """获取个股近期公告并做情绪评分（基本面/情绪面分析的输入）.
 
     当用户关心"最近有什么消息/新闻""市场情绪如何""有没有利好利空"时调用。
-    返回新闻标题列表与情绪评分（0-100，越高越偏正面）。
+    数据源为公司公告（东方财富 ann 接口），返回公告标题、类别与情绪评分
+    （0-100，越高越偏正面）。
 
     Args:
         symbol: 股票代码，支持 sh600519 / sz000001 / 600519 等格式。
-        limit: 返回新闻条数，默认10（范围1-30）。
+        limit: 返回公告条数，默认10（范围1-30）。
 
     Returns:
-        包含新闻列表与情绪摘要的 Markdown 文本。
+        包含公告列表与情绪摘要的 Markdown 文本。
     """
     if not settings.ENABLE_NEWS:
         return "⚠️ 新闻情绪工具当前未启用（ENABLE_NEWS=false）。"
@@ -87,14 +92,14 @@ async def fetch_news_sentiment(symbol: str, limit: int = 10) -> str:
     avg = round(sum(n["score"] for n in news) / len(news), 1)
     mood = "偏正面" if avg >= 60 else "偏负面" if avg <= 40 else "中性"
     lines = [
-        f"## {symbol} 近期新闻（{len(news)}条，平均情绪 {avg}/100，{mood}）",
+        f"## {symbol} 近期公告（{len(news)}条，平均情绪 {avg}/100，{mood}）",
         "",
-        "| 日期 | 来源 | 标题 | 情绪 |",
+        "| 日期 | 类别 | 标题 | 情绪 |",
         "| --- | --- | --- | --- |",
     ]
     for n in news:
         title = (n["title"] or n["summary"] or "")[:40]
-        lines.append(f"| {n['date']} | {n['source']} | {title} | {n['score']} |")
+        lines.append(f"| {n['date']} | {n['category']} | {title} | {n['score']} |")
     lines.append("\n⚠️ 以上新闻与情绪评分仅供参考，不构成投资建议。")
     return "\n".join(lines)
 

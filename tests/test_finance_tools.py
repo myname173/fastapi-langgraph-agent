@@ -44,7 +44,19 @@ def test_tools_disabled_by_default(monkeypatch):
 
 async def _fake_http(url: str):
     if "qt.gtimg" in url:
-        return 'v_sh600519="1~贵州茅台~600519~1685.0~1680.0~1690.0~1680.0~1696.0~1680.0~12345"'
+        # Real qt.gtimg.cn q= returns ~88 ~-separated fields; only the
+        # indices the parser reads need to be populated here. [39]=PE,
+        # [46]=PB (see _extract_valuation field-layout comment).
+        f = [""] * 47
+        f[0] = "1"
+        f[1] = "贵州茅台"
+        f[2] = "600519"
+        f[3] = "1685.00"
+        f[4] = "1680.00"
+        f[5] = "1690.00"
+        f[39] = "25.50"
+        f[46] = "8.20"
+        return 'v_sh600519="' + "~".join(f) + '"'
     if "ifzq" in url or "appstock" in url:
         return {
             "data": {
@@ -63,8 +75,16 @@ async def _fake_http(url: str):
         return {
             "data": {
                 "list": [
-                    {"title": "公司营收大涨", "notice_date": "2024-01-05", "source_type": "东方财富"},
-                    {"title": "行业风险警示", "notice_date": "2024-01-04", "source_type": "同花顺"},
+                    {
+                        "title": "公司营收大涨",
+                        "notice_date": "2024-01-05",
+                        "columns": [{"column_name": "业绩"}],
+                    },
+                    {
+                        "title": "行业风险警示",
+                        "notice_date": "2024-01-04",
+                        "columns": [{"column_name": "风险提示"}],
+                    },
                 ]
             }
         }
@@ -96,19 +116,26 @@ def test_kline_parses(monkeypatch):
 
 
 def test_fundamentals_parses(monkeypatch):
-    """fetch_fundamentals renders name + ROE + disclaimer from mocked data."""
+    """fetch_fundamentals renders name + ROE + PE/PB + disclaimer from mocked data."""
     monkeypatch.setattr(settings, "ENABLE_FUNDAMENTALS", True)
     monkeypatch.setattr(fundamentals_tools, "ahttp_get_json", _fake_http)
     out = asyncio.run(fundamentals_tools.fetch_fundamentals.ainvoke({"symbol": "600519"}))
     assert "贵州茅台" in out
     assert "ROE" in out
     assert "不构成投资建议" in out
+    # PE/PB now read from the correct gtimg indices (39/46), not the
+    # turnover/market-cap fields that previously shadowed them.
+    assert "25.5" in out
+    assert "8.2" in out
 
 
 def test_news_parses(monkeypatch):
-    """fetch_news_sentiment renders sentiment + titles from mocked news."""
+    """fetch_news_sentiment renders sentiment + titles + category from mocked news."""
     monkeypatch.setattr(settings, "ENABLE_NEWS", True)
     monkeypatch.setattr(news_tools, "ahttp_get_json", _fake_http)
     out = asyncio.run(news_tools.fetch_news_sentiment.ainvoke({"symbol": "600519", "limit": "5"}))
     assert "情绪" in out
     assert "营收大涨" in out
+    # The readable announcement category surfaces instead of the numeric
+    # source_type code (e.g. "31").
+    assert "业绩" in out
