@@ -277,9 +277,14 @@ def _build_default_registry() -> ToolRegistry:
     from app.core.langgraph.tools.asset_tools import asset_tools_list
     from app.core.langgraph.tools.code_index_tools import code_index_tools_list
     from app.core.langgraph.tools.duckduckgo_search import duckduckgo_search_tool
+    from app.core.langgraph.tools.fundamentals_tools import fundamentals_tools_list
     from app.core.langgraph.tools.knowledge_base_tools import knowledge_base_tools_list
+    from app.core.langgraph.tools.kline_tools import kline_tools_list
     from app.core.langgraph.tools.media_tools import media_tools_list
+    from app.core.langgraph.tools.news_tools import news_tools_list
+    from app.core.langgraph.tools.chart_tools import chart_tools_list
     from app.core.langgraph.tools.quote_tools import quote_tools_list
+    from app.core.langgraph.tools.research_debate_tools import research_debate_tools_list
     from app.core.langgraph.tools.sdlc_tools import sdlc_tools_list
 
     registry = ToolRegistry()
@@ -303,6 +308,49 @@ def _build_default_registry() -> ToolRegistry:
             agents={"chat"},
             requires={"ENABLE_REALTIME_QUOTES"},
             tags={"finance", "real_time"},
+        )
+
+    # -- Fundamental analysis (chat agent) --------------------------------
+    for f_tool in fundamentals_tools_list:
+        registry.register(
+            f_tool,
+            agents={"chat"},
+            requires={"ENABLE_FUNDAMENTALS"},
+            tags={"finance", "fundamental"},
+        )
+    # -- K-line / technical indicators (chat agent) -----------------------
+    for k_tool in kline_tools_list:
+        registry.register(
+            k_tool,
+            agents={"chat"},
+            requires={"ENABLE_KLINE"},
+            tags={"finance", "technical"},
+        )
+    # -- News & sentiment (chat agent) -------------------------------------
+    for n_tool in news_tools_list:
+        registry.register(
+            n_tool,
+            agents={"chat"},
+            requires={"ENABLE_NEWS"},
+            tags={"finance", "news", "sentiment"},
+        )
+
+    # -- Chart generation (chat agent) -------------------------------------
+    for c_tool in chart_tools_list:
+        registry.register(
+            c_tool,
+            agents={"chat"},
+            requires={"ENABLE_CHART_GEN"},
+            tags={"finance", "visualization"},
+        )
+
+    # -- Research debate (chat agent, P2) ----------------------------------
+    for r_tool in research_debate_tools_list:
+        registry.register(
+            r_tool,
+            agents={"chat"},
+            requires={"ENABLE_RESEARCH_DEBATE"},
+            tags={"finance", "research", "debate"},
         )
 
     # -- Knowledge base tools (chat agent searches user-uploaded docs) --
