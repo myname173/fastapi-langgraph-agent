@@ -226,6 +226,53 @@ class Settings:
             if m.strip()
         ]
         self.SESSION_NAMING_ENABLED = os.getenv("SESSION_NAMING_ENABLED", "true").lower() == "true"
+
+        # ------------------------------------------------------------------
+        # Chat model adaptation (per-turn routing for the stock advisor).
+        # Every switch defaults to off so that the chat agent behaves exactly
+        # as before when none of these are enabled (zero regression).
+        # ------------------------------------------------------------------
+        # Master switch: when off, `_chat` uses the DEFAULT_LLM_MODEL and the
+        # original `cacheable=True` path. When on, turns are classified and
+        # routed per intent.
+        self.ENABLE_CHAT_MODEL_ROUTING = os.getenv("ENABLE_CHAT_MODEL_ROUTING", "false").lower() == "true"
+        # When on, casual / short chit-chat turns are served by the local 1.5B
+        # vLLM model (free + low latency) instead of the cloud heavy model.
+        # The local model is constrained (1536 ctx, 100-token output, single
+        # user), so it MUST only be used for short casual replies.
+        self.ENABLE_LOCAL_CHAT_TIER = os.getenv("ENABLE_LOCAL_CHAT_TIER", "false").lower() == "true"
+        # Local model used for intent classification. Must be a local vLLM
+        # model name (e.g. local-qwen-1.5b) — a single short-label call.
+        self.LOCAL_CHAT_INTENT_MODEL = os.getenv("LOCAL_CHAT_INTENT_MODEL", "local-qwen-1.5b")
+        # Local model used for casual replies.
+        self.LOCAL_CHAT_MODEL = os.getenv("LOCAL_CHAT_MODEL", "local-qwen-1.5b")
+        # Enable reasoning/effort mode for analytical turns (cloud heavy only).
+        self.CHAT_ENABLED_REASONING = os.getenv("CHAT_ENABLED_REASONING", "false").lower() == "true"
+        self.CHAT_CASUAL_TEMPERATURE = float(os.getenv("CHAT_CASUAL_TEMPERATURE", "0.3"))
+        self.CHAT_ANALYTICAL_TEMPERATURE = float(os.getenv("CHAT_ANALYTICAL_TEMPERATURE", "0.1"))
+        self.CHAT_ANALYTICAL_MAX_TOKENS = int(os.getenv("CHAT_ANALYTICAL_MAX_TOKENS", "8000"))
+        # Tool names whose output is real-time market data. Answers derived
+        # from these MUST NOT be cached (avoid serving stale quotes later).
+        # Names must match the registered function/tool names.
+        self.REALTIME_TOOL_NAMES = parse_list_from_env("REALTIME_TOOL_NAMES", ["fetch_realtime_quote"])
+        # When on, the chat agent uses the investment-advisor system prompt
+        # (app/core/prompts/investment_advisor.md) instead of the generic one.
+        self.ENABLE_INVESTMENT_ADVISOR = os.getenv("ENABLE_INVESTMENT_ADVISOR", "false").lower() == "true"
+        # P0 finance data tools for the chat stock-advisor. Each is gated so
+        # the upstream data source can be disabled independently.
+        self.ENABLE_FUNDAMENTALS = os.getenv("ENABLE_FUNDAMENTALS", "false").lower() == "true"
+        self.ENABLE_KLINE = os.getenv("ENABLE_KLINE", "false").lower() == "true"
+        self.ENABLE_NEWS = os.getenv("ENABLE_NEWS", "false").lower() == "true"
+        # P1 portfolio management for the chat stock-advisor. Gates the
+        # /portfolio API router entirely (no route registered when off).
+        self.ENABLE_PORTFOLIO = os.getenv("ENABLE_PORTFOLIO", "false").lower() == "true"
+        # P1 Finance layered memory (FinMem-style metadata) and chart gen.
+        self.ENABLE_FINANCIAL_MEMORY = os.getenv("ENABLE_FINANCIAL_MEMORY", "false").lower() == "true"
+        self.ENABLE_CHART_GEN = os.getenv("ENABLE_CHART_GEN", "false").lower() == "true"
+        # P2 personalisation: risk-profile storage/API and research debate.
+        self.ENABLE_RISK_PROFILE = os.getenv("ENABLE_RISK_PROFILE", "false").lower() == "true"
+        self.ENABLE_RESEARCH_DEBATE = os.getenv("ENABLE_RESEARCH_DEBATE", "false").lower() == "true"
+
         self.DEFAULT_LLM_TEMPERATURE = float(os.getenv("DEFAULT_LLM_TEMPERATURE", "0.2"))
         self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
         # Token budget for SDLC orchestrator messages. Larger than MAX_TOKENS

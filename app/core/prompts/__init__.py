@@ -15,12 +15,24 @@ with open(os.path.join(_PROMPTS_DIR, "system.md"), "r") as _f:
 with open(os.path.join(_PROMPTS_DIR, "session_title.md"), "r") as _f:
     SESSION_TITLE_PROMPT = _f.read()
 
+# Optional investment-advisor system prompt (loaded lazily; only when the
+# file exists so the generic template remains the default fallback).
+_INVESTMENT_ADVISOR_TEMPLATE: Optional[str] = None
+_invest_path = os.path.join(_PROMPTS_DIR, "investment_advisor.md")
+if os.path.exists(_invest_path):
+    with open(_invest_path, "r", encoding="utf-8") as _f:
+        _INVESTMENT_ADVISOR_TEMPLATE = _f.read()
+
 # Cache key: (agent_name, version) → template string
 _agent_prompt_cache: dict[tuple[str, str], str] = {}
 
 
 def load_system_prompt(username: Optional[str] = None, vision_context: str = "", **kwargs):
     """Load the system prompt from the cached template.
+
+    When ``settings.ENABLE_INVESTMENT_ADVISOR`` is true and the advisor
+    template exists, the chat agent is switched to the investment-advisor
+    persona (three-pillar framework + mandatory disclaimer gate).
 
     Args:
         username: Optional display name, injected as user context.
@@ -29,8 +41,13 @@ def load_system_prompt(username: Optional[str] = None, vision_context: str = "",
             the user/VLM-provided text never raise.
         **kwargs: Additional template variables (e.g. ``long_term_memory``).
     """
+    if settings.ENABLE_INVESTMENT_ADVISOR and _INVESTMENT_ADVISOR_TEMPLATE:
+        template = _INVESTMENT_ADVISOR_TEMPLATE
+    else:
+        template = _SYSTEM_PROMPT_TEMPLATE
+
     user_context = f"# User\nYou are talking to {username}.\n" if username else ""
-    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
+    system_prompt = template.format(
         agent_name=settings.PROJECT_NAME + " Agent",
         current_date_and_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         user_context=user_context,
