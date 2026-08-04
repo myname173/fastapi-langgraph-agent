@@ -45,6 +45,9 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./app:/app/app
+      - ./frontend:/app/frontend
+      - ./alembic:/app/alembic
+      - ./tiktoken_cache:/tmp/tiktoken
       - ./logs:/app/logs
       - ./scripts:/app/scripts
     env_file:
@@ -57,6 +60,11 @@ services:
       - openai_api_key
     environment:
       - APP_ENV=${APP_ENV:-production}
+      # tiktoken BPE cache: pre-cached in ./tiktoken_cache (mounted at
+      # /tmp/tiktoken). Without this env var, tiktoken defaults to
+      # /tmp/data-gym-cache and tries to download from Azure Blob Storage,
+      # which is unreachable from the container and hangs indefinitely.
+      - TIKTOKEN_CACHE_DIR=/tmp/tiktoken
       # L-15 fix: JWT_SECRET_KEY is intentionally NOT set here. Previously
       # this line had a predictable fallback ("supersecretkeythatshouldbe...")
       # which (a) is 47 chars so it PASSED config.py's >=32-char production
@@ -289,7 +297,12 @@ services:
     profiles: ["tunnel"]
     # Quick tunnel mode (temporary, URL changes on restart).
     # For persistent URL, switch to: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    command: tunnel --no-autoupdate --url http://app:8000
+    #
+    # --protocol http2: forces TCP/443 instead of QUIC/UDP. Required on networks
+    #   where outbound UDP is blocked/unreliable (symptom: "failed to dial to
+    #   edge with quic: timeout: no recent network activity").
+    # --edge-ip-version 4: forces IPv4 edge to avoid broken IPv6 egress paths.
+    command: tunnel --no-autoupdate --protocol http2 --edge-ip-version 4 --url http://app:8000
     depends_on:
       app:
         condition: service_healthy

@@ -232,20 +232,43 @@ class Settings:
         # Every switch defaults to off so that the chat agent behaves exactly
         # as before when none of these are enabled (zero regression).
         # ------------------------------------------------------------------
+        # Per-message round-robin rotation across these chat models. When
+        # non-empty, `_chat` picks the next model in turn for each user turn,
+        # independent from the healthy-pointer fallback chain (override path
+        # sets advance_health=False, so rotation never corrupts it). Each
+        # entry MUST also appear in LLM_MODELS so LLMRegistry can resolve it.
+        # Empty list (default) → no rotation, zero regression.
+        self.CHAT_ROTATION_MODELS = parse_list_from_env("CHAT_ROTATION_MODELS", [])
         # Master switch: when off, `_chat` uses the DEFAULT_LLM_MODEL and the
         # original `cacheable=True` path. When on, turns are classified and
         # routed per intent.
-        self.ENABLE_CHAT_MODEL_ROUTING = os.getenv("ENABLE_CHAT_MODEL_ROUTING", "false").lower() == "true"
+        self.ENABLE_CHAT_MODEL_ROUTING = os.getenv("ENABLE_CHAT_MODEL_ROUTING", "true").lower() == "true"
         # When on, casual / short chit-chat turns are served by the local 1.5B
         # vLLM model (free + low latency) instead of the cloud heavy model.
         # The local model is constrained (1536 ctx, 100-token output, single
         # user), so it MUST only be used for short casual replies.
-        self.ENABLE_LOCAL_CHAT_TIER = os.getenv("ENABLE_LOCAL_CHAT_TIER", "false").lower() == "true"
+        self.ENABLE_LOCAL_CHAT_TIER = os.getenv("ENABLE_LOCAL_CHAT_TIER", "true").lower() == "true"
         # Local model used for intent classification. Must be a local vLLM
         # model name (e.g. local-qwen-1.5b) — a single short-label call.
         self.LOCAL_CHAT_INTENT_MODEL = os.getenv("LOCAL_CHAT_INTENT_MODEL", "local-qwen-1.5b")
         # Local model used for casual replies.
         self.LOCAL_CHAT_MODEL = os.getenv("LOCAL_CHAT_MODEL", "local-qwen-1.5b")
+        # Explicitly identifies models served by the local vLLM deployment.
+        # A model is never classified as local merely because of its name.
+        self.LOCAL_LLM_MODELS = parse_list_from_env(
+            "LOCAL_LLM_MODELS",
+            list(dict.fromkeys([self.LOCAL_CHAT_INTENT_MODEL, self.LOCAL_CHAT_MODEL])),
+        )
+        # User-facing, physical model identity for aliases exposed by vLLM.
+        # Example: {"local-qwen-1.5b":"Qwen2.5-1.5B-Instruct-GPTQ-Int4"}.
+        _raw_model_identities = os.getenv("LLM_MODEL_IDENTITIES", "")
+        try:
+            self.LLM_MODEL_IDENTITIES = json.loads(_raw_model_identities) if _raw_model_identities else {}
+            if not isinstance(self.LLM_MODEL_IDENTITIES, dict):
+                self.LLM_MODEL_IDENTITIES = {}
+        except (json.JSONDecodeError, TypeError):
+            self.LLM_MODEL_IDENTITIES = {}
+        self.ENABLE_LLM_EXECUTION_AUDIT = os.getenv("ENABLE_LLM_EXECUTION_AUDIT", "true").lower() == "true"
         # Enable reasoning/effort mode for analytical turns (cloud heavy only).
         self.CHAT_ENABLED_REASONING = os.getenv("CHAT_ENABLED_REASONING", "false").lower() == "true"
         self.CHAT_CASUAL_TEMPERATURE = float(os.getenv("CHAT_CASUAL_TEMPERATURE", "0.3"))
@@ -255,6 +278,19 @@ class Settings:
         # from these MUST NOT be cached (avoid serving stale quotes later).
         # Names must match the registered function/tool names.
         self.REALTIME_TOOL_NAMES = parse_list_from_env("REALTIME_TOOL_NAMES", ["fetch_realtime_quote"])
+        # Pure-regex A-share symbol extraction -> non-binding hint injected
+        # into the cloud LLM context to assist tool-arg selection. Zero LLM
+        # cost, zero hallucination (format match + QUOTE_ALLOWED_PREFIXES
+        # whitelist filter only). Empty match -> no hint, zero regression.
+        self.ENABLE_SYMBOL_HINT = os.getenv("ENABLE_SYMBOL_HINT", "true").lower() == "true"
+        # Append a hardcoded disclaimer to non-casual (financial) answers
+        # for compliance. Skipped for CASUAL chit-chat. Driven by
+        # needs_disclaimer() (symbol hit or financial keyword).
+        self.ENABLE_CHAT_DISCLAIMER = os.getenv("ENABLE_CHAT_DISCLAIMER", "true").lower() == "true"
+        self.CHAT_DISCLAIMER_TEXT = os.getenv(
+            "CHAT_DISCLAIMER_TEXT",
+            "\n\n---\n⚠️ 免责声明：以上内容由 AI 生成，仅供参考，不构成任何投资建议。请独立判断并自行承担交易风险。",
+        )
         # When on, the chat agent uses the investment-advisor system prompt
         # (app/core/prompts/investment_advisor.md) instead of the generic one.
         self.ENABLE_INVESTMENT_ADVISOR = os.getenv("ENABLE_INVESTMENT_ADVISOR", "false").lower() == "true"
@@ -269,9 +305,20 @@ class Settings:
         # P1 Finance layered memory (FinMem-style metadata) and chart gen.
         self.ENABLE_FINANCIAL_MEMORY = os.getenv("ENABLE_FINANCIAL_MEMORY", "false").lower() == "true"
         self.ENABLE_CHART_GEN = os.getenv("ENABLE_CHART_GEN", "false").lower() == "true"
+        # Stable directory for generated charts, served statically at /charts/*.
+        self.CHART_DIR = Path(
+            os.getenv("CHART_OUTPUT_DIR", str(Path(__file__).resolve().parent.parent.parent / "data" / "charts"))
+        )
+        self.CHART_DIR.mkdir(parents=True, exist_ok=True)
         # P2 personalisation: risk-profile storage/API and research debate.
         self.ENABLE_RISK_PROFILE = os.getenv("ENABLE_RISK_PROFILE", "false").lower() == "true"
         self.ENABLE_RESEARCH_DEBATE = os.getenv("ENABLE_RESEARCH_DEBATE", "false").lower() == "true"
+        # P2 watchlist (自选股) — user-curated symbol tracker. Gates the
+        # /watchlist API router entirely (no route registered when off).
+        self.ENABLE_WATCHLIST = os.getenv("ENABLE_WATCHLIST", "false").lower() == "true"
+        # P2 alert (价格预警) — user-defined price-breakout triggers. Gates
+        # the /alerts API router; no route when off.
+        self.ENABLE_ALERT = os.getenv("ENABLE_ALERT", "false").lower() == "true"
 
         self.DEFAULT_LLM_TEMPERATURE = float(os.getenv("DEFAULT_LLM_TEMPERATURE", "0.2"))
         self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))

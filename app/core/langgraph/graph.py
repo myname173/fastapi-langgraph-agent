@@ -5,6 +5,7 @@ import time
 from typing import (
     AsyncGenerator,
     Optional,
+    Union,
     cast,
 )
 
@@ -48,9 +49,15 @@ from app.core.metrics import llm_inference_duration_seconds
 from app.core.observability import langfuse_callback_handler
 from app.core.chat_intent import (
     ChatIntent,
+    IntentResult,
     classify_chat_intent,
 )
 from app.core.prompts import load_system_prompt
+from app.core.symbol_extract import (
+    DISCLAIMER_TEXT,
+    extract_a_share_symbols,
+    needs_disclaimer,
+)
 from app.core.task_manager import task_manager
 from app.services import finance_memory
 from app.services.risk_profile_service import risk_profile_service
@@ -60,6 +67,7 @@ from app.schemas import (
 )
 from app.services.image_service import image_service
 from app.services.llm import llm_service
+from app.services.llm.execution_context import set_llm_execution_context
 from app.services.memory import memory_service
 from app.services.quota_service import quota_service
 from app.schemas.chat import ChatImage
@@ -181,6 +189,45 @@ def _format_risk_profile(rp) -> str:
     )
 
 
+# Maps internal tool names to a human-readable label shown as a progress chip
+# in the chat UI while the agent is calling the tool (streamed via SSE).
+# Keys MUST match the registered @tool function names (see tools/*_tools.py).
+TOOL_LABELS: dict[str, str] = {
+    "fetch_realtime_quote": "查询实时行情",
+    "fetch_fundamentals": "读取基本面",
+    "fetch_kline": "计算技术指标",
+    "fetch_news_sentiment": "检索新闻舆情",
+    "generate_chart": "生成图表",
+    "research_debate": "多空研究辩论",
+    "duckduckgo_search": "联网搜索",
+    "search_knowledge_base": "检索知识库",
+    "ask_human": "等待人工确认",
+}
+
+
+class _ToolEventCollector(BaseCallbackHandler):
+    """Forward tool start/end events to an ``asyncio.Queue``.
+
+    ``get_stream_response`` drains this queue concurrently with the token
+    stream so the frontend can display "正在查询实时行情…" progress chips
+    without blocking text delivery.
+    """
+
+    def __init__(self, queue: "asyncio.Queue") -> None:
+        super().__init__()
+        self._queue = queue
+
+    async def on_tool_start(
+        self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, **kwargs
+    ):
+        name = (serialized or {}).get("name") if isinstance(serialized, dict) else None
+        label = TOOL_LABELS.get(name or "", name or "调用工具")
+        await self._queue.put({"type": "tool", "label": label})
+
+    async def on_tool_end(self, output, *, run_id, parent_run_id=None, tags=None, metadata=None, **kwargs):
+        await self._queue.put({"type": "tool", "label": None})
+
+
 class LangGraphAgent:
     """Manages the LangGraph Agent/workflow and interactions with the LLM.
 
@@ -263,15 +310,23 @@ class LangGraphAgent:
         model_kwargs: dict = {}
         cacheable = True
         call_model_name = None  # None -> resolves to DEFAULT_LLM_MODEL
+        is_local_casual = False
+        last_user_text = _extract_last_user_text(state["messages"])
+        # ── Local intent classification + tool/symbol extraction ────────
+        # `classify_chat_intent` now returns IntentResult(intent, tool, symbol).
+        # The tool/symbol fields are only populated when intent = TOOL_NEEDED
+        # and the local 1.5B classifier parsed them successfully.
+        intent_result: IntentResult | None = None
         if settings.ENABLE_CHAT_MODEL_ROUTING:
-            last_user_text = _extract_last_user_text(state["messages"])
-            intent = await classify_chat_intent(last_user_text)
+            intent_result = await classify_chat_intent(last_user_text)
+            intent = intent_result.intent
             if intent == ChatIntent.CASUAL and settings.ENABLE_LOCAL_CHAT_TIER:
                 # Short chit-chat -> local 1.5B (free, low latency). Use the
                 # minimal message set because the local model has a tiny ctx.
                 call_model_name = settings.LOCAL_CHAT_MODEL
                 model_kwargs = {"temperature": settings.CHAT_CASUAL_TEMPERATURE}
                 messages = _build_local_casual_messages(last_user_text)
+                is_local_casual = True
             else:
                 # analytical / tool_needed -> cloud heavy model. Keep the
                 # DEFAULT_LLM_MODEL (zero regression) but tune the budget:
@@ -290,23 +345,84 @@ class LangGraphAgent:
                 # about, so the advisor "knows the user" across sessions.
                 if settings.ENABLE_FINANCIAL_MEMORY:
                     _symbol, _name = _extract_symbol_from_tools(state["messages"])
-                    if _symbol:
+                    if _symbol and isinstance(user_id, str):
                         await finance_memory.remember_symbol_if_new(user_id, _symbol, _name)
         # --- end adaptation ---
+
+        # Non-binding symbol hint: regex-extracted A-share codes are appended
+        # as a system message so the cloud LLM can use them as tool-arg
+        # reference. Independent of ENABLE_CHAT_MODEL_ROUTING — fires whenever
+        # the cloud model is used (the default path when routing is off), so
+        # ENABLE_SYMBOL_HINT works standalone. Skipped on the local CASUAL
+        # path (tiny ctx, no tools bound, messages already trimmed). Zero LLM
+        # cost, whitelist-filtered, explicitly framed as ignorable — never
+        # forces a tool call. Empty match -> no hint, zero regression.
+        if settings.ENABLE_SYMBOL_HINT and not is_local_casual:
+            _hint_syms = extract_a_share_symbols(last_user_text)
+            if _hint_syms:
+                messages.append(
+                    Message(
+                        role="system",
+                        content=(
+                            "[标的提示] 用户消息中检测到代码："
+                            + "、".join(_hint_syms)
+                            + "。请作为工具参数参考，若与用户意图不符请忽略。"
+                        ),
+                    )
+                )
+
+        # Local tool + symbol hint: when intent classification is ON and the
+        # local 1.5B produced a TOOL_NEEDED result with tool/symbol, inject
+        # them as a structured system prompt so the cloud LLM can skip a
+        # round of tool-selection inference.  Non-binding — the cloud agent
+        # still decides which tool to call.  Independent of ENABLE_SYMBOL_HINT
+        # (regex) — complementary: regex catches all symbols, local 1.5B adds
+        # intent-aware tool prediction.
+        if (
+            not is_local_casual
+            and intent_result is not None
+            and intent_result.intent == ChatIntent.TOOL_NEEDED
+            and intent_result.tool
+        ):
+            hint_parts = [f"工具: {intent_result.tool}"]
+            if intent_result.symbol:
+                hint_parts.append(f"代码: {intent_result.symbol}")
+            hint_parts.append("若预判有误请根据实际消息重新选择工具和参数")
+            messages.append(
+                Message(
+                    role="system",
+                    content="[工具预判] " + "，".join(hint_parts),
+                )
+            )
+
+        # Per-message model rotation (round-robin). Independent from the
+        # healthy pointer: _call_with_fallback sets advance_health=False for
+        # override calls, so rotation never corrupts the default fallback
+        # chain. Skipped when call_model_name was already set by intent
+        # routing (e.g. CASUAL → local) so that path keeps priority.
+        if settings.CHAT_ROTATION_MODELS and not call_model_name:
+            call_model_name = self.llm_service.next_chat_rotation_model()
 
         try:
             # Use LLM service with automatic retries and circular fallback.
             # Enable semantic cache for chat — semantically similar user
             # queries hit the cache without an LLM call (unless suppressed for
             # real-time market data above).
-            with llm_inference_duration_seconds.labels(model=call_model_name or model_name).time():
-                response_message = await self.llm_service.call(
-                    dump_messages(messages),
-                    model_name=call_model_name,
-                    cacheable=cacheable,
-                    cache_user_id=user_id,
-                    **model_kwargs,
-                )
+            purpose = "chat_casual" if is_local_casual else "chat"
+            with set_llm_execution_context(
+                execution_id=thread_id,
+                user_id=int(user_id) if user_id else None,
+                agent_name="chat",
+                purpose=purpose,
+            ):
+                with llm_inference_duration_seconds.labels(model=call_model_name or model_name).time():
+                    response_message = await self.llm_service.call(
+                        dump_messages(messages),
+                        model_name=call_model_name,
+                        cacheable=cacheable,
+                        cache_user_id=user_id,
+                        **model_kwargs,
+                    )
 
             # Process response to handle structured content blocks
             response_message = process_llm_response(response_message)
@@ -564,7 +680,15 @@ class LangGraphAgent:
                 memory_latency_ms=memory_latency_ms,
                 total_latency_ms=total_latency_ms,
             )
-            return self.__process_messages(response["messages"])
+            result_msgs = self.__process_messages(response["messages"])
+            # Non-stream mirror of the streaming disclaimer: append the
+            # hardcoded compliance notice to the last assistant message when
+            # the user turn was financial (symbol hit or financial keyword).
+            # Skipped for CASUAL chit-chat and interrupted turns (the early
+            # return above). Gated by ENABLE_CHAT_DISCLAIMER (default off).
+            if settings.ENABLE_CHAT_DISCLAIMER and result_msgs and needs_disclaimer(messages[-1].content):
+                result_msgs[-1].content += DISCLAIMER_TEXT
+            return result_msgs
         except GraphInterrupt:
             state = await graph.aget_state(config)
             interrupt_value = state.tasks[0].interrupts[0].value if state.tasks else "Waiting for input."
@@ -581,7 +705,7 @@ class LangGraphAgent:
         user_id: Optional[str] = None,
         username: Optional[str] = None,
         images: Optional[list[ChatImage]] = None,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Union[str, dict], None]:
         """Get a stream response from the LLM.
 
         Args:
@@ -630,17 +754,53 @@ class LangGraphAgent:
                     "vision_context": vision_context or "",
                 }
 
-            async for token, _ in graph.astream(
-                graph_input,
-                config,
-                stream_mode="messages",
-            ):
-                if not isinstance(token, (AIMessage, AIMessageChunk)):
-                    continue
+            # Surface tool calls as progress chips: collect them into a queue
+            # via a callback and interleave them with the text-token stream.
+            tool_event_queue: asyncio.Queue = asyncio.Queue()
+            collector = _ToolEventCollector(tool_event_queue)
+            config = {**config, "callbacks": [*callbacks, collector]}
 
-                text = extract_text_content(token.content)
-                if text:
-                    yield text
+            async def _produce_tokens() -> None:
+                try:
+                    async for token, _ in graph.astream(
+                        graph_input,
+                        config,
+                        stream_mode="messages",
+                    ):
+                        if not isinstance(token, (AIMessage, AIMessageChunk)):
+                            continue
+                        text = extract_text_content(token.content)
+                        if text:
+                            await token_q.put(text)
+                except Exception as exc:  # surface to the consumer below
+                    await token_q.put(exc)
+                finally:
+                    await token_q.put(None)  # sentinel: stream finished
+
+            token_q: asyncio.Queue = asyncio.Queue()
+            producer = asyncio.create_task(_produce_tokens())
+
+            while True:
+                get_token = asyncio.ensure_future(token_q.get())
+                get_event = asyncio.ensure_future(tool_event_queue.get())
+                done, pending = await asyncio.wait({get_token, get_event}, return_when=asyncio.FIRST_COMPLETED)
+                for fut in pending:
+                    fut.cancel()
+                if get_token in done:
+                    item = get_token.result()
+                    if item is None:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    yield item
+                else:
+                    yield get_event.result()
+
+            # Drain any trailing tool events (e.g. a final tool_end).
+            while not tool_event_queue.empty():
+                yield tool_event_queue.get_nowait()
+
+            await producer
 
             # After streaming completes, check for interrupt or update memory
             state = await graph.aget_state(config)
@@ -654,6 +814,13 @@ class LangGraphAgent:
                     memory_service.add(user_id, openai_msgs, config.get("metadata")),
                     name="memory_add",
                 )
+                # Append a hardcoded compliance disclaimer when the user turn
+                # was financial (symbol hit or financial keyword). Skipped for
+                # CASUAL chit-chat and for interrupted turns (which ask the
+                # user back rather than answer). Zero LLM cost; gated by
+                # ENABLE_CHAT_DISCLAIMER (default off -> zero regression).
+                if settings.ENABLE_CHAT_DISCLAIMER and needs_disclaimer(messages[-1].content):
+                    yield DISCLAIMER_TEXT
             total_latency_ms = round((time.perf_counter() - t0) * 1000)
             logger.info(
                 "chat_stream_latency",

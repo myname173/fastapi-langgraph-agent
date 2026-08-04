@@ -12,15 +12,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
-import tempfile
-from pathlib import Path
 
 from langchain_core.tools import tool
 
 from app.core.config import settings
 
-CHART_DIR = Path(os.getenv("CHART_OUTPUT_DIR", str(Path(tempfile.gettempdir()) / "generated_charts")))
+# Charts are written into the stable, statically-served directory so the
+# frontend can render them via a predictable URL (/charts/<file>.svg).
+CHART_DIR = settings.CHART_DIR
 
 
 def _parse_data(data: str) -> tuple[list[str], list[float]]:
@@ -115,11 +114,11 @@ async def generate_chart(chart_type: str, title: str, data: str) -> str:
     except Exception as e:
         return f"⚠️ 图表保存失败：{e}"
 
+    url = f"/charts/{fname}"
     return (
-        f"已生成{('饼图' if chart_type == 'pie' else '柱状图')}：{title}\n"
-        f"标签：{', '.join(labels)}\n"
-        f"数值：{', '.join(str(v) for v in values)}\n"
-        f"文件：{path}"
+        f"已生成{('饼图' if chart_type == 'pie' else '柱状图')}：{title}\n\n"
+        f"![{title}]({url})\n\n"
+        f"> 数据标签：{', '.join(labels)}｜数值：{', '.join(str(v) for v in values)}"
     )
 
 

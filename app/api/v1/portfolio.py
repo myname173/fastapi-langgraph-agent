@@ -6,8 +6,6 @@ mirror ``app/api/v1/sdlc.py``. Registered only when ``ENABLE_PORTFOLIO`` is on
 (see ``api.py``), so it is inert by default.
 """
 
-from __future__ import annotations
-
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -65,9 +63,9 @@ class HoldingUpdate(BaseModel):
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-def _require_portfolio(pid: str, user_id: int) -> Portfolio:
+async def _require_portfolio(pid: str, user_id: int) -> Portfolio:
     """Fetch a portfolio, raising 404 if missing or not owned by the user."""
-    p = portfolio_service.get_portfolio(pid)
+    p = await portfolio_service.get_portfolio(pid)
     if not p or p.user_id != user_id:
         raise HTTPException(status_code=404, detail="组合不存在")
     return p
@@ -98,7 +96,7 @@ async def _current_price(symbol: str) -> Optional[float]:
 # ----------------------------------------------------------------------
 # Portfolio routes
 # ----------------------------------------------------------------------
-@router.post("/")
+@router.post("")
 @limiter.limit("10 per minute")
 async def create_portfolio(
     request: Request,
@@ -115,10 +113,10 @@ async def create_portfolio(
         return p.model_dump()
     except Exception as e:
         logger.error("portfolio_create_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")
 
 
-@router.get("/")
+@router.get("")
 @limiter.limit("20 per minute")
 async def list_portfolios(
     request: Request,
@@ -130,7 +128,7 @@ async def list_portfolios(
         return [p.model_dump() for p in items]
     except Exception as e:
         logger.error("portfolio_list_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")
 
 
 @router.get("/{pid}")
@@ -142,13 +140,13 @@ async def get_portfolio(
 ):
     """Get a single portfolio (must belong to the user)."""
     try:
-        p = _require_portfolio(pid, session.user_id)
+        p = await _require_portfolio(pid, session.user_id)
         return p.model_dump()
     except HTTPException:
         raise
     except Exception as e:
         logger.error("portfolio_get_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")
 
 
 @router.put("/{pid}")
@@ -161,7 +159,7 @@ async def update_portfolio(
 ):
     """Update portfolio name / risk / cash."""
     try:
-        _require_portfolio(pid, session.user_id)
+        await _require_portfolio(pid, session.user_id)
         risk = RiskTolerance(body.risk_tolerance) if body.risk_tolerance else None
         p = await portfolio_service.update_portfolio(pid, name=body.name, risk=risk, cash=body.cash)
         if not p:
@@ -171,7 +169,7 @@ async def update_portfolio(
         raise
     except Exception as e:
         logger.error("portfolio_update_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")
 
 
 @router.delete("/{pid}")
@@ -183,14 +181,14 @@ async def delete_portfolio(
 ):
     """Delete a portfolio and its holdings."""
     try:
-        _require_portfolio(pid, session.user_id)
+        await _require_portfolio(pid, session.user_id)
         ok = await portfolio_service.delete_portfolio(pid)
         return {"deleted": ok}
     except HTTPException:
         raise
     except Exception as e:
         logger.error("portfolio_delete_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")
 
 
 # ----------------------------------------------------------------------
@@ -206,7 +204,7 @@ async def add_holding(
 ):
     """Add a holding to a portfolio."""
     try:
-        _require_portfolio(pid, session.user_id)
+        await _require_portfolio(pid, session.user_id)
         if not _is_allowed_symbol(body.symbol):
             raise HTTPException(
                 status_code=400,
@@ -220,7 +218,7 @@ async def add_holding(
         raise
     except Exception as e:
         logger.error("holding_add_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")
 
 
 @router.put("/{pid}/holdings/{hid}")
@@ -234,7 +232,7 @@ async def update_holding(
 ):
     """Update a holding."""
     try:
-        _require_portfolio(pid, session.user_id)
+        await _require_portfolio(pid, session.user_id)
         h = await portfolio_service.update_holding(hid, shares=body.shares, cost_price=body.cost_price, name=body.name)
         if not h:
             raise HTTPException(status_code=404, detail="持仓不存在")
@@ -243,7 +241,7 @@ async def update_holding(
         raise
     except Exception as e:
         logger.error("holding_update_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")
 
 
 @router.delete("/{pid}/holdings/{hid}")
@@ -256,14 +254,14 @@ async def delete_holding(
 ):
     """Delete a holding."""
     try:
-        _require_portfolio(pid, session.user_id)
+        await _require_portfolio(pid, session.user_id)
         ok = await portfolio_service.delete_holding(hid)
         return {"deleted": ok}
     except HTTPException:
         raise
     except Exception as e:
         logger.error("holding_delete_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")
 
 
 # ----------------------------------------------------------------------
@@ -282,7 +280,7 @@ async def analyze_portfolio(
     so the aggregation still renders instead of failing.
     """
     try:
-        _require_portfolio(pid, session.user_id)
+        await _require_portfolio(pid, session.user_id)
         holdings = await portfolio_service.get_holdings(pid)
         p = await portfolio_service.get_portfolio(pid)
         rows = []
@@ -323,4 +321,4 @@ async def analyze_portfolio(
         raise
     except Exception as e:
         logger.error("portfolio_analysis_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="portfolio")

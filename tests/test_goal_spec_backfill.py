@@ -152,9 +152,7 @@ class TestGoalSpecBackfill:
             # Should not raise ValueError on SDLCTaskStatus("specing")
             await _persist_task_outcome("thread-001", state)
 
-        mock_task_svc.update_task_status.assert_awaited_once_with(
-            "thread-001", SDLCTaskStatus("specing")
-        )
+        mock_task_svc.update_task_status.assert_awaited_once_with("thread-001", SDLCTaskStatus("specing"))
 
     async def test_backfill_failure_is_best_effort(self):
         """If goal_service.update_goal raises, the error is swallowed (best-effort)."""

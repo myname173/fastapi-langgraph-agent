@@ -417,14 +417,20 @@ class SPAStaticFiles(StaticFiles):
                 used to decide whether the 404 should fall back.
         """
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as ex:
             if ex.status_code != 404:
                 raise
             full = scope.get("path", "") or "/"
             if full.startswith(self._NO_FALLBACK):
                 raise
-            return await super().get_response("index.html", scope)
+            response = await super().get_response("index.html", scope)
+        # no-cache: browser may cache but MUST revalidate (ETag/Last-Modified)
+        # before reuse. Unchanged -> 304 (fast), changed -> 200 new content.
+        # Lets users pick up frontend edits with a normal refresh, no Ctrl+F5.
+        if hasattr(response, "headers"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 # Mount the zero-build static SPA as the catch-all root. Registered LAST so all
@@ -434,6 +440,14 @@ class SPAStaticFiles(StaticFiles):
 # index.html for unknown non-API paths so history-API routes (/investor, /coder)
 # work on refresh. Guarded so pure-backend deploys without a ``frontend/``
 # directory do not crash on startup.
+# Serve generated charts at /charts/* before the SPA catch-all so they take
+# precedence over the index.html fallback. Guarded by directory existence.
+_CHART_DIR = settings.CHART_DIR
+_CHART_DIR.mkdir(parents=True, exist_ok=True)
+if _CHART_DIR.is_dir():
+    app.mount("/charts", StaticFiles(directory=str(_CHART_DIR)), name="charts")
+    logger.info("charts_mounted", root=str(_CHART_DIR))
+
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 if _FRONTEND_DIR.is_dir():
     app.mount("/", SPAStaticFiles(directory=str(_FRONTEND_DIR), html=True), name="spa")

@@ -155,7 +155,15 @@ async def chat_stream(
                         username=session.username,
                         images=chat_request.images,
                     ):
-                        response = StreamResponse(content=chunk, done=False)
+                        if isinstance(chunk, dict):
+                            response = StreamResponse(
+                                content="",
+                                done=False,
+                                type=chunk.get("type", "tool"),
+                                label=chunk.get("label"),
+                            )
+                        else:
+                            response = StreamResponse(content=chunk, done=False)
                         yield f"data: {json.dumps(response.model_dump(mode='json'))}\n\n"
 
                 # Send final message indicating completion

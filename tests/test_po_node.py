@@ -309,4 +309,3 @@ class TestPONodeRiskGate:
 
         update = result.update
         assert "human_approval_needed" not in update or update.get("human_approval_needed") is False
-

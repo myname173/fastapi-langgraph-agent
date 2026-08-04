@@ -23,6 +23,8 @@ from app.models.sdlc_task import SDLCTask, SDLCTaskStatus
 from app.schemas.sdlc import SDLCReplayResponse, SDLCRequest, SDLCResponse
 from app.services.approval_log_service import approval_log_service
 from app.services.llm.router import model_router
+from app.services.llm.policy import model_policy
+from app.services.llm_execution_service import llm_execution_service
 from app.services.goal_service import goal_service
 from app.services.sdlc_task_service import sdlc_task_service
 from app.utils.errors import safe_500, safe_stream_error
@@ -121,6 +123,8 @@ async def sdlc_orchestrate(
             status_code=400,
             detail=f"coder_model 不在可选列表内: {sdlc_request.coder_model}",
         )
+    if sdlc_request.coder_model and not model_policy.is_allowed(sdlc_request.coder_model, "coder"):
+        raise HTTPException(status_code=400, detail="本地轻量模型不能用于 Coder 任务")
 
     try:
         # L-3 fix: generate a unique thread_id per orchestration call so
@@ -240,6 +244,8 @@ async def sdlc_orchestrate_stream(
             status_code=400,
             detail=f"coder_model 不在可选列表内: {sdlc_request.coder_model}",
         )
+    if sdlc_request.coder_model and not model_policy.is_allowed(sdlc_request.coder_model, "coder"):
+        raise HTTPException(status_code=400, detail="本地轻量模型不能用于 Coder 任务")
 
     async def stream_response():
         try:
@@ -396,8 +402,26 @@ async def sdlc_get_models(
     LLMRegistry.get() at runtime.
     """
     return {
-        "models": list(settings.CODER_ELIGIBLE_MODELS),
+        "models": model_policy.coder_models(list(settings.CODER_ELIGIBLE_MODELS)),
         "default": model_router.get_model_for("coder"),
+    }
+
+
+@router.get("/{thread_id}/model-executions")
+@limiter.limit("30 per minute")
+async def sdlc_get_model_executions(
+    request: Request,
+    thread_id: str,
+    session: Session = Depends(get_current_session),
+):
+    """Return content-free LLM execution attempts for one owned SDLC task."""
+    task = await sdlc_task_service.get_task(thread_id)
+    if task is None or task.user_id != session.user_id:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    executions = await llm_execution_service.get_for_execution(thread_id)
+    return {
+        "thread_id": thread_id,
+        "executions": [entry.model_dump(mode="json") for entry in executions],
     }
 
 

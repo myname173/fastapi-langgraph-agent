@@ -5,8 +5,6 @@ and error handling mirror ``sdlc.py``. Registered only when
 ``ENABLE_RISK_PROFILE`` is on.
 """
 
-from __future__ import annotations
-
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -46,7 +44,7 @@ async def get_my_profile(
         return {"risk_profile": p.model_dump()}
     except Exception as e:
         logger.error("risk_profile_get_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="risk_profile")
 
 
 @router.put("/me")
@@ -69,4 +67,4 @@ async def upsert_my_profile(
         return p.model_dump()
     except Exception as e:
         logger.error("risk_profile_upsert_failed", error=str(e))
-        return safe_500(e)
+        raise safe_500(e, context="risk_profile")

@@ -25,6 +25,7 @@ from app.models.session import Session as ChatSession
 from app.schemas.chat import SessionTitle
 from app.services.database import database_service
 from app.services.llm import llm_service
+from app.services.llm.execution_context import set_llm_execution_context
 from app.services.llm.router import model_router
 
 _PLACEHOLDER_MAX = 40
@@ -55,16 +56,22 @@ def _claim_session_sync(session_id: str, placeholder: str) -> bool:
 
 async def _persist_session_name(session_id: str, user_message: str) -> None:
     try:
-        result = await llm_service.call(
-            [
-                SystemMessage(content=SESSION_TITLE_PROMPT),
-                HumanMessage(content=user_message[:500]),
-            ],
-            model_name=model_router.get_model_for("session_naming"),
-            response_format=SessionTitle,
-            max_tokens=32,
-            temperature=0.3,
-        )
+        with set_llm_execution_context(
+            execution_id=session_id,
+            user_id=None,
+            agent_name="session_naming",
+            purpose="session_naming",
+        ):
+            result = await llm_service.call(
+                [
+                    SystemMessage(content=SESSION_TITLE_PROMPT),
+                    HumanMessage(content=user_message[:500]),
+                ],
+                model_name=model_router.get_model_for("session_naming"),
+                response_format=SessionTitle,
+                max_tokens=32,
+                temperature=0.3,
+            )
         await database_service.update_session_name(session_id, result.title)
         session_names_generated_total.labels(status="success").inc()
         logger.info("session_name_generated", session_id=session_id, name=result.title)

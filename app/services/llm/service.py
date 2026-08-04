@@ -17,6 +17,7 @@ Two distinct execution paths:
 
 import asyncio
 import logging
+import time
 from typing import (
     Any,
     Callable,
@@ -50,6 +51,9 @@ from app.core.config import settings
 from app.core.logging import logger
 from app.core.semantic_cache import semantic_cache
 from app.services.llm.registry import LLMRegistry
+from app.services.llm.execution_context import get_llm_execution_context
+from app.services.llm.policy import model_policy
+from app.services.llm_execution_service import llm_execution_service
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -102,6 +106,11 @@ class LLMService:
         """Initialize the LLM service with the configured default model."""
         self._llm: Any = None  # BaseChatModel; read-only after __init__
         self._healthy_index: int = 0
+        # Per-message chat model rotation cursor. INDEPENDENT from
+        # _healthy_index: advanced only by next_chat_rotation_model(), never
+        # by the fallback loop, so rotation cannot corrupt the default
+        # fallback chain (project_memory constraint).
+        self._chat_rotation_index: int = 0
         self._bound_tools: List = []
 
         all_names = LLMRegistry.get_all_names()
@@ -271,9 +280,31 @@ class LLMService:
         Returns:
             ``BaseChatModel`` instance.
         """
+        selected_model = model_name or settings.DEFAULT_LLM_MODEL
+        model_policy.validate(selected_model, get_llm_execution_context().purpose)
         if model_name is None:
             return self._llm
         return LLMRegistry.get(model_name)
+
+    def next_chat_rotation_model(self) -> Optional[str]:
+        """Return the next chat model name in round-robin order.
+
+        Cycles through ``settings.CHAT_ROTATION_MODELS`` independently from
+        the healthy-pointer fallback chain. Returns ``None`` when the
+        rotation list is empty (no rotation configured).
+
+        asyncio's single-threaded model makes the index advance safe
+        without a lock, mirroring :meth:`_advance_healthy_pointer`.
+
+        Returns:
+            The next model name, or ``None`` if rotation is disabled.
+        """
+        models = settings.CHAT_ROTATION_MODELS
+        if not models:
+            return None
+        idx = self._chat_rotation_index
+        self._chat_rotation_index = (idx + 1) % len(models)
+        return models[idx]
 
     def bind_tools(self, tools: List) -> "LLMService":
         """Bind tools to the default LLM instance.
@@ -409,6 +440,8 @@ class LLMService:
             return self._build_target(idx, response_format, model_kwargs)
 
         is_model_override = bool(model_name)
+        requested_model = model_name or settings.DEFAULT_LLM_MODEL
+        model_policy.validate(requested_model, get_llm_execution_context().purpose)
         if model_name or response_format or model_kwargs:
             all_names = LLMRegistry.get_all_names()
             if model_name and model_name not in all_names:
@@ -420,13 +453,20 @@ class LLMService:
         else:
             start = self._healthy_index
 
-        return await self._fallback_loop(messages, start, get_target, advance_health=not is_model_override)
+        return await self._fallback_loop(
+            messages,
+            start,
+            get_target,
+            requested_model=requested_model,
+            advance_health=not is_model_override,
+        )
 
     async def _fallback_loop(
         self,
         messages: LanguageModelInput,
         start: int,
         get_target: Callable[[int], Any],
+        requested_model: str,
         advance_health: bool = True,
     ) -> Any:
         """Per-call circular fallback — try each model in turn until success.
@@ -435,6 +475,7 @@ class LLMService:
             messages: Messages to send.
             start: Registry index to begin from (snapshot of healthy pointer).
             get_target: Returns the ``Runnable`` to invoke for a given index.
+            requested_model: Model selected before fallback attempts begin.
             advance_health: When True, advance ``self._healthy_index`` on
                 success. Should be False for override calls (explicit
                 ``model_name``) so a lightweight-model success doesn't
@@ -450,11 +491,35 @@ class LLMService:
         current = start
         models_tried = 0
         last_error: Optional[Exception] = None
+        execution_context = get_llm_execution_context()
 
         for models_tried in range(1, total + 1):
             current_name = LLMRegistry.LLMS[current]["name"]
+            if not model_policy.is_allowed(current_name, execution_context.purpose):
+                logger.warning(
+                    "llm_fallback_model_blocked_by_policy",
+                    model=current_name,
+                    purpose=execution_context.purpose,
+                )
+                current = (current + 1) % total
+                continue
+            identity = model_policy.get_identity(current_name)
+            attempt_start = time.perf_counter()
             try:
                 result = await self._invoke_with_retry(get_target(current), messages)
+                await llm_execution_service.record(
+                    execution_id=execution_context.execution_id,
+                    user_id=execution_context.user_id,
+                    agent_name=execution_context.agent_name,
+                    purpose=execution_context.purpose,
+                    requested_model=requested_model,
+                    effective_model=current_name,
+                    actual_model=identity.actual_model,
+                    deployment=identity.deployment,
+                    attempt=models_tried,
+                    outcome="succeeded",
+                    duration_ms=round((time.perf_counter() - attempt_start) * 1000),
+                )
                 # Advance the healthy pointer (success-only, no race).
                 # Skipped for override calls to keep the default path stable.
                 if advance_health:
@@ -462,6 +527,20 @@ class LLMService:
                 return result
             except OpenAIError as e:
                 last_error = e
+                await llm_execution_service.record(
+                    execution_id=execution_context.execution_id,
+                    user_id=execution_context.user_id,
+                    agent_name=execution_context.agent_name,
+                    purpose=execution_context.purpose,
+                    requested_model=requested_model,
+                    effective_model=current_name,
+                    actual_model=identity.actual_model,
+                    deployment=identity.deployment,
+                    attempt=models_tried,
+                    outcome="failed",
+                    duration_ms=round((time.perf_counter() - attempt_start) * 1000),
+                    error_type=type(e).__name__,
+                )
                 logger.error(
                     "llm_call_failed_after_retries",
                     model=current_name,

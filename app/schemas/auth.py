@@ -105,14 +105,20 @@ class SessionResponse(BaseResponse):
         session_id: The unique identifier for the chat session
         name: Name of the session (defaults to empty string)
         token: The authentication token for the session. Only populated by
-            ``create_session``; list/update endpoints leave it ``None`` to
-            avoid minting unused JWTs on every call (L-6 fix).
+            ``create_session`` and ``resume_session``; list/update endpoints
+            leave it ``None`` to avoid minting unused JWTs on every call
+            (L-6 fix).
+        created_at: When the session was created. Populated by the list
+            endpoint so the chat-history sidebar can order/label sessions.
     """
 
     session_id: str = Field(..., description="The unique identifier for the chat session")
     name: str = Field(default="", description="Name of the session", max_length=100)
     token: Token | None = Field(
         default=None, description="The authentication token for the session (only set on creation)"
+    )
+    created_at: datetime | None = Field(
+        default=None, description="When the session was created (set by the list endpoint)"
     )
 
     @field_validator("name")

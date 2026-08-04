@@ -314,68 +314,123 @@ async def create_session(request: Request, user: User = Depends(get_current_user
         raise HTTPException(status_code=422, detail=str(ve))
 
 
-@router.patch("/session/{session_id}/name", response_model=SessionResponse)
-async def update_session_name(
-    session_id: str, name: str = Form(...), current_session: Session = Depends(get_current_session)
-):
-    """Update a session's name.
+@router.post("/session/{session_id}/resume", response_model=SessionResponse)
+@limiter.limit(settings.RATE_LIMIT_ENDPOINTS["session"][0])
+async def resume_session(request: Request, session_id: str, user: User = Depends(get_current_user)):
+    """Resume an existing chat session by issuing a fresh session token.
+
+    Used by the chat-history sidebar to switch back to a previous session.
+    The caller authenticates with a user token; ownership is verified
+    before a session token is minted.
 
     Args:
-        session_id: The ID of the session to update
-        name: The new name for the session
-        current_session: The current session from auth
+        request: The FastAPI request object for rate limiting.
+        session_id: The ID of the session to resume.
+        user: The authenticated user.
 
     Returns:
-        SessionResponse: The updated session information
+        SessionResponse: The session id, name, a fresh session token, and
+            created_at.
+
+    Raises:
+        HTTPException: 404 if the session does not exist, or 403 if it
+            belongs to another user.
+    """
+    try:
+        sanitized_session_id = sanitize_string(session_id)
+        target = await db_service.get_session(sanitized_session_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if target.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Cannot resume other users' sessions")
+
+        token = create_access_token(sanitized_session_id)
+        logger.info("session_resumed", session_id=sanitized_session_id, user_id=user.id)
+        return SessionResponse(
+            session_id=sanitized_session_id,
+            name=sanitize_string(target.name),
+            token=token,
+            created_at=target.created_at,
+        )
+    except ValueError as ve:
+        logger.exception("session_resume_validation_failed", error=str(ve), user_id=user.id)
+        raise HTTPException(status_code=422, detail=str(ve))
+
+
+@router.patch("/session/{session_id}/name", response_model=SessionResponse)
+async def update_session_name(session_id: str, name: str = Form(...), user: User = Depends(get_current_user)):
+    """Update a session's name.
+
+    Authenticates with a user token and verifies ownership of the target
+    session, so the chat-history sidebar can rename any of the user's
+    sessions (not only the currently active one).
+
+    Args:
+        session_id: The ID of the session to update.
+        name: The new name for the session.
+        user: The authenticated user.
+
+    Returns:
+        SessionResponse: The updated session information.
+
+    Raises:
+        HTTPException: 403 if the session does not belong to the user.
     """
     try:
         # Sanitize inputs
         sanitized_session_id = sanitize_string(session_id)
         sanitized_name = sanitize_string(name)
-        sanitized_current_session = sanitize_string(current_session.id)
 
-        # Verify the session ID matches the authenticated session
-        if sanitized_session_id != sanitized_current_session:
+        # Verify ownership of the target session (user-token auth lets the
+        # sidebar rename any of the user's sessions, not only the active one).
+        target = await db_service.get_session(sanitized_session_id)
+        if target is None or target.user_id != user.id:
             raise HTTPException(status_code=403, detail="Cannot modify other sessions")
 
         # Update the session name
         session = await db_service.update_session_name(sanitized_session_id, sanitized_name)
 
-        # L-6 fix: do not mint a new JWT on rename — the caller already
-        # holds a valid session token (they authenticated via
-        # get_current_session to reach this endpoint). Returning a fresh
-        # token here was "not strictly necessary" per the original
-        # comment and only inflated the response. token defaults to None.
-        return SessionResponse(session_id=sanitized_session_id, name=session.name)
+        # L-6 fix: do not mint a new JWT on rename. token defaults to None.
+        return SessionResponse(
+            session_id=sanitized_session_id,
+            name=session.name,
+            created_at=target.created_at,
+        )
     except ValueError as ve:
         logger.exception("session_update_validation_failed", error=str(ve), session_id=session_id)
         raise HTTPException(status_code=422, detail=str(ve))
 
 
 @router.delete("/session/{session_id}")
-async def delete_session(session_id: str, current_session: Session = Depends(get_current_session)):
+async def delete_session(session_id: str, user: User = Depends(get_current_user)):
     """Delete a session for the authenticated user.
 
+    Authenticates with a user token and verifies ownership, so the
+    chat-history sidebar can delete any of the user's sessions.
+
     Args:
-        session_id: The ID of the session to delete
-        current_session: The current session from auth
+        session_id: The ID of the session to delete.
+        user: The authenticated user.
 
     Returns:
         None
+
+    Raises:
+        HTTPException: 403 if the session does not belong to the user.
     """
     try:
         # Sanitize inputs
         sanitized_session_id = sanitize_string(session_id)
-        sanitized_current_session = sanitize_string(current_session.id)
 
-        # Verify the session ID matches the authenticated session
-        if sanitized_session_id != sanitized_current_session:
+        # Verify ownership of the target session.
+        target = await db_service.get_session(sanitized_session_id)
+        if target is None or target.user_id != user.id:
             raise HTTPException(status_code=403, detail="Cannot delete other sessions")
 
         # Delete the session
         await db_service.delete_session(sanitized_session_id)
 
-        logger.info("session_deleted", session_id=session_id, user_id=current_session.user_id)
+        logger.info("session_deleted", session_id=session_id, user_id=user.id)
     except ValueError as ve:
         logger.exception("session_deletion_validation_failed", error=str(ve), session_id=session_id)
         raise HTTPException(status_code=422, detail=str(ve))
@@ -403,6 +458,7 @@ async def get_user_sessions(user: User = Depends(get_current_user)):
             SessionResponse(
                 session_id=sanitize_string(session.id),
                 name=sanitize_string(session.name),
+                created_at=session.created_at,
             )
             for session in sessions
         ]

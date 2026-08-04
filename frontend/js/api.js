@@ -42,6 +42,20 @@
     });
   }
 
+  /* fetch with USER token — for session metadata management (list/resume/
+   * delete/rename sessions). Distinct from authFetch which uses the session
+   * token for chat endpoints. On 401 clear tokens and bounce to login. */
+  function userFetch(path, options) {
+    options = options || {};
+    options.headers = Object.assign({}, options.headers || {}, {
+      Authorization: "Bearer " + getUserToken(),
+    });
+    return fetch(API_BASE + path, options).then(function (resp) {
+      if (resp.status === 401) { redirectToLogin(); throw new Error("未授权，请重新登录"); }
+      return resp;
+    });
+  }
+
   /* Register: JSON body -> resp.token.access_token (user token). */
   function register(email, password, username) {
     var body = { email: email, password: password };
@@ -94,6 +108,65 @@
       if (!tok) throw new Error("会话响应缺少 token");
       setSessionToken(tok);
       return tok;
+    });
+  }
+
+  /* List the user's chat sessions (user token). Returns
+   * [{session_id, name, created_at}] newest-first. */
+  function listSessions() {
+    return userFetch("/auth/sessions").then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(parseError(t, r.status)); });
+      return r.json();
+    });
+  }
+
+  /* Resume an existing session: POST /auth/session/{id}/resume (user token)
+   * -> {session_id, name, token, created_at}. Stores the fresh session token
+   * and returns the full payload so the caller can update UI state. */
+  function resumeSession(sessionId) {
+    return userFetch("/auth/session/" + encodeURIComponent(sessionId) + "/resume", { method: "POST" })
+      .then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error(parseError(t, r.status)); });
+        return r.json();
+      })
+      .then(function (data) {
+        var tok = data && data.token && data.token.access_token;
+        if (!tok) throw new Error("恢复会话响应缺少 token");
+        setSessionToken(tok);
+        return data;
+      });
+  }
+
+  /* Get messages for the CURRENT session (session token): {messages:[...]}. */
+  function getSessionMessages() {
+    return authFetch("/chatbot/messages").then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(parseError(t, r.status)); });
+      return r.json();
+    });
+  }
+
+  /* Delete a session (user token). Returns true on success. */
+  function deleteSession(sessionId) {
+    return userFetch("/auth/session/" + encodeURIComponent(sessionId), { method: "DELETE" })
+      .then(function (r) {
+        if (!r.ok && r.status !== 204) {
+          return r.text().then(function (t) { throw new Error(parseError(t, r.status)); });
+        }
+        return true;
+      });
+  }
+
+  /* Rename a session (user token, form-encoded name). Returns the updated
+   * {session_id, name, created_at}. */
+  function renameSession(sessionId, name) {
+    var fd = new FormData();
+    fd.append("name", name);
+    return userFetch("/auth/session/" + encodeURIComponent(sessionId) + "/name", {
+      method: "PATCH",
+      body: fd,
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(parseError(t, r.status)); });
+      return r.json();
     });
   }
 
@@ -177,6 +250,11 @@
       .then(function (r) { return r.json(); });
   }
 
+  function getModelExecutions(threadId) {
+    return authFetch("/sdlc/" + encodeURIComponent(threadId) + "/model-executions")
+      .then(function (r) { return r.json(); });
+  }
+
   /* List LLM models the user may select for the SDLC coder agent.
    * Returns {models:[name,...], default:name}. Used by the coder view
    * to populate the model dropdown. */
@@ -199,10 +277,14 @@
     getUserToken: getUserToken, setUserToken: setUserToken,
     getSessionToken: getSessionToken, setSessionToken: setSessionToken,
     clearTokens: clearTokens, redirectToLogin: redirectToLogin,
-    authFetch: authFetch,
+    authFetch: authFetch, userFetch: userFetch,
     register: register, login: login, createSession: createSession,
+    listSessions: listSessions, resumeSession: resumeSession,
+    getSessionMessages: getSessionMessages,
+    deleteSession: deleteSession, renameSession: renameSession,
     streamSSE: streamSSE,
     approve: approve, reject: reject, getSdlcState: getSdlcState,
+    getModelExecutions: getModelExecutions,
     getCoderModels: getCoderModels,
   };
 })(window);

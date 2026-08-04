@@ -53,6 +53,18 @@ if settings.ENABLE_RISK_PROFILE:
 
     api_router.include_router(risk_profile_router, prefix="/risk-profile", tags=["Risk Profile"])
 
+# P2 watchlist (自选股) for the chat stock-advisor.
+if settings.ENABLE_WATCHLIST:
+    from app.api.v1.watchlist import router as watchlist_router
+
+    api_router.include_router(watchlist_router, prefix="/watchlist", tags=["Watchlist"])
+
+# P2 alert (价格预警) for the chat stock-advisor.
+if settings.ENABLE_ALERT:
+    from app.api.v1.alert import router as alert_router
+
+    api_router.include_router(alert_router, prefix="/alerts", tags=["Alerts"])
+
 
 @api_router.get("/health")
 async def health_check():

@@ -138,10 +138,16 @@ class StreamResponse(BaseResponse):
     Attributes:
         content: The content of the current chunk.
         done: Whether the stream is complete.
+        type: Event kind - ``"content"`` for text tokens, ``"tool"`` for agent
+            tool-call progress chips.
+        label: Human-readable tool label for ``type == "tool"`` events (e.g.
+            ``"查询实时行情"``); ``None`` signals the tool finished.
     """
 
     content: str = Field(default="", description="The content of the current chunk")
     done: bool = Field(default=False, description="Whether the stream is complete")
+    type: str = Field(default="content", description="Event kind: content | tool")
+    label: Optional[str] = Field(default=None, description="Tool label for type=='tool' events")
 
 
 class SessionTitle(BaseModel):

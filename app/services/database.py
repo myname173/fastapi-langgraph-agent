@@ -180,7 +180,9 @@ class DatabaseService:
     def _get_user_sessions_sync(self, user_id: int) -> List[ChatSession]:
         with Session(self.engine) as session:
             statement = (
-                select(ChatSession).where(col(ChatSession.user_id) == user_id).order_by(col(ChatSession.created_at))
+                select(ChatSession)
+                .where(col(ChatSession.user_id) == user_id)
+                .order_by(col(ChatSession.created_at).desc())
             )
             sessions = session.exec(statement).all()
             return list(sessions)
@@ -280,7 +282,9 @@ class DatabaseService:
     async def _get_user_sessions_async(self, user_id: int) -> List[ChatSession]:
         async with get_async_session_maker()() as session:
             statement = (
-                select(ChatSession).where(col(ChatSession.user_id) == user_id).order_by(col(ChatSession.created_at))
+                select(ChatSession)
+                .where(col(ChatSession.user_id) == user_id)
+                .order_by(col(ChatSession.created_at).desc())
             )
             result = await session.execute(statement)
             return list(result.scalars().all())

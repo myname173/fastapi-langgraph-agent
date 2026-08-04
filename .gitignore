@@ -19,6 +19,9 @@ test_data/
 .env.staging
 .env.production
 
+# Secrets (reinforces secrets/.gitignore)
+secrets/openai_api_key.txt
+
 # Misc
 *.ipynb
 
@@ -36,3 +39,6 @@ logs/
 
 # SDLC coder agent runtime workspace (generated code artifacts per task)
 workspace/
+
+# tiktoken BPE cache (pre-cached tokenizer blobs, large binaries)
+tiktoken_cache/

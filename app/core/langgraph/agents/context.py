@@ -30,6 +30,7 @@ from app.services.code_index_service import code_index_service
 from app.services.knowledge_base_service import knowledge_base_service
 from app.services.llm import llm_service
 from app.services.llm.usage_tracker import set_llm_context
+from app.services.llm.execution_context import set_llm_execution_context
 from app.services.smart_search_service import smart_search_service
 from app.utils import dump_sdlc_messages
 
@@ -191,9 +192,18 @@ def wrap_node_with_handoff(
             config = {}
 
         async def _invoke() -> Any:
-            if _accepts_config:
-                return await node_func(state, config)
-            return await node_func(state)
+            configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+            metadata = config.get("metadata", {}) if isinstance(config, dict) else {}
+            user_id = metadata.get("user_id")
+            with set_llm_execution_context(
+                execution_id=configurable.get("thread_id"),
+                user_id=int(user_id) if user_id else None,
+                agent_name=node_name,
+                purpose=node_name,
+            ):
+                if _accepts_config:
+                    return await node_func(state, config)
+                return await node_func(state)
 
         if not settings.ENABLE_HANDOFF_TRACING:
             return await _invoke()
