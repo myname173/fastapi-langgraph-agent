@@ -42,12 +42,10 @@ def _sync_get_json(url: str, timeout: int) -> Any:
     # Most endpoints return JSON; the gtimg quote endpoint returns JS text
     # (e.g. ``v_sh600519="..."``). Return the raw text on parse failure so
     # callers that need the JS payload can split it themselves.
-    if text is None:
-        text = ""
     try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return text
+        return json.loads(text or "")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return text or ""
 
 
 async def ahttp_get_json(url: str, timeout: int = DEFAULT_TIMEOUT) -> Any:
