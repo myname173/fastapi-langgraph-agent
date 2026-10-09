@@ -29,6 +29,30 @@ class FileChange(BaseModel):
     content: str = Field(..., description="变更内容")
     commit_message: Optional[str] = Field(None, description="提交信息")
 
+    @field_validator("change_type", mode="before")
+    @classmethod
+    def _coerce_edit_type(cls, value: object) -> object:
+        """Accept ``CodeEdit.edit_type`` aliases for ``change_type``.
+
+        ``CodeEdit.edit_type`` uses the edit vocabulary
+        (``replace`` / ``insert`` / ``create`` / ``delete``) while
+        ``change_type`` describes the user-facing file change
+        (``create`` / ``modify`` / ``delete``). Historically the two were
+        copied into each other verbatim, so a stored ``"replace"`` (or
+        ``"insert"``) failed validation and turned a completed workflow into
+        an HTTP 500 at serialisation time.
+
+        Only the known aliases are mapped; any other value is passed through
+        unchanged so the ``Literal`` still rejects genuinely invalid input.
+        """
+        if isinstance(value, str):
+            alias = value.strip().lower()
+            if alias in {"replace", "insert"}:
+                return "modify"
+            if alias in {"create", "modify", "delete"}:
+                return alias
+        return value
+
 
 class CodeEdit(BaseModel):
     """Represents a single code edit operation for smart editing."""
@@ -228,7 +252,7 @@ class SDLCRequest(BaseModel):
 class SDLCResponse(BaseModel):
     """Response model for SDLC Orchestrator API."""
 
-    status: Literal["specing", "planning", "coding", "testing", "reviewing", "completed"] = Field(
+    status: Literal["specing", "planning", "coding", "testing", "reviewing", "completed", "failed"] = Field(
         ..., description="当前阶段状态"
     )
     plan: List[Task] = Field(default_factory=list, description="执行计划")

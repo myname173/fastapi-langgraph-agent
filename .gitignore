@@ -42,3 +42,37 @@ workspace/
 
 # tiktoken BPE cache (pre-cached tokenizer blobs, large binaries)
 tiktoken_cache/
+
+# ---------------------------------------------------------------------------
+# Agent / IDE working state — not part of the shipped project
+# ---------------------------------------------------------------------------
+# WorkBuddy project data: agent memory notes, screenshot evidence, helper tools
+.workbuddy-ai/
+# CodeBuddy IDE local workspace config
+.codebuddy/
+
+# ---------------------------------------------------------------------------
+# Local scratch output — build logs, ad-hoc probes, run dumps
+# ---------------------------------------------------------------------------
+build_log*.txt
+build_log*.err
+c_err.txt
+chat_test.txt
+coder_run*.txt
+coder_run*.err
+coder_tasks.txt
+coder_tasks_result.json
+d.txt
+pc_all.txt
+probe_models.sh
+proc_check.sh
+preempt_trigger*.py
+# WSL environment debugging scratch
+wsl_*.txt
+wsl_*.ps1
+# Ad-hoc script output dumps
+scripts/coder_out.txt
+
+# Standalone presentation pages authored outside the app build
+chat-flow-*.html
+interview-*.html

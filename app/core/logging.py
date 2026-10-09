@@ -30,6 +30,14 @@ from app.core.config import (
 # Ensure log directory exists
 settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Bind open() at import time. During interpreter shutdown, mem0's pgvector
+# __del__ triggers logging whose emit() calls open(); by then builtins may be
+# partially cleared, raising "NameError: name 'open' is not defined". A
+# module-level binding keeps the reference alive for the handler's lifetime
+# (stderr then shows the shutdown traceback otherwise, even though emit's own
+# try/except already swallows the failure).
+_open = open
+
 # Context variables for storing request-specific data
 _request_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("request_context", default=None)
 
@@ -165,7 +173,7 @@ class JsonlFileHandler(logging.Handler):
             if isinstance(extra, dict):
                 log_entry.update(extra)
 
-            with open(self.file_path, "a", encoding="utf-8") as f:
+            with _open(self.file_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(log_entry) + "\n")
         except Exception:
             self.handleError(record)

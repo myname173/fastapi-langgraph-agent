@@ -6,6 +6,8 @@ from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
+
 
 class SDLCTaskStatus(str, Enum):
     """SDLC task status enumeration."""
@@ -18,9 +20,13 @@ class SDLCTaskStatus(str, Enum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     PAUSED = "paused"
+    # Terminal failure (e.g. the supervisor circuit breaker tripped after an
+    # agent exceeded MAX_CODER_RETRIES). Distinct from COMPLETED so a run that
+    # produced no output is not reported as a success.
+    FAILED = "failed"
 
 
-class SDLCTask(SQLModel, table=True):
+class SDLCTask(UTCDateTimeMixin, SQLModel, table=True):
     """SDLCTask model for storing SDLC workflow tasks.
 
     Attributes:
@@ -34,6 +40,7 @@ class SDLCTask(SQLModel, table=True):
         updated_at: When the task was last updated
         completed_at: When the task was completed (optional)
         goal_id: Optional association to a Goal (cross-session grouping)
+        coder_model: Coder model the run was launched with (optional)
     """
 
     # NOTE: explicit __tablename__ is REQUIRED because the alembic migration
@@ -53,3 +60,8 @@ class SDLCTask(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: Optional[datetime] = Field(default=None)
     goal_id: Optional[str] = Field(default=None, index=True)
+    # Coder model the run was launched with (from SDLCTaskRequest.coder_model).
+    # NULL for runs predating this column; the UI renders "-" rather than
+    # guessing. Distinct from llm_execution, which records the *actual* model
+    # each agent used (and can differ if the fallback chain rotated).
+    coder_model: Optional[str] = Field(default=None)

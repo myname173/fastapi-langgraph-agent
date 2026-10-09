@@ -6,6 +6,8 @@ from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
+
 
 class ApprovalAction(str, Enum):
     """Approval action types."""
@@ -24,7 +26,7 @@ class ApprovalStep(str, Enum):
     WORKFLOW = "workflow"
 
 
-class ApprovalLog(SQLModel, table=True):
+class ApprovalLog(UTCDateTimeMixin, SQLModel, table=True):
     """ApprovalLog model for storing human approval audit records.
 
     Attributes:

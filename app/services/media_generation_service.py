@@ -18,7 +18,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
 from app.core.logging import logger
 
-_DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/api/v1"
+# DashScope native API base. Configurable because Bailian accounts provisioned
+# with a dedicated MaaS workspace must use their own host, e.g.
+#   https://ws-xxxxxxxx.cn-beijing.maas.aliyuncs.com/api/v1
+# The shared public gateway is the default.
+_DASHSCOPE_BASE = settings.MEDIA_DASHSCOPE_BASE_URL
 # Video generation can take 1-5 minutes; allow generous polling.
 _VIDEO_POLL_TIMEOUT = 300
 _VIDEO_POLL_INTERVAL = 5
@@ -29,7 +33,11 @@ class MediaGenerationService:
 
     def __init__(self) -> None:
         """Initialize DashScope API credentials and headers."""
-        self._api_key = settings.OPENAI_API_KEY
+        # DashScope-native API, so this needs a Bailian/DashScope credential —
+        # the same one the embedding provider uses in the split setup (chat
+        # may point at a vendor without DashScope access). Only reached when
+        # ENABLE_MEDIA_GENERATION is true.
+        self._api_key = settings.EMBEDDING_API_KEY
         self._base_url = _DASHSCOPE_BASE
         self._headers = {
             "Authorization": f"Bearer {self._api_key}",

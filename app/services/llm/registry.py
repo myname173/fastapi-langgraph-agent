@@ -35,7 +35,7 @@ def _resolve_provider_config(model_name: str) -> tuple[SecretStr, str, Dict[str,
     """Resolve provider config for a model, with per-model override support.
 
     Checks ``settings.LLM_PROVIDER_OVERRIDES`` first; falls back to the
-    shared ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` / ``MAX_TOKENS``.
+    shared ``CHAT_API_KEY`` / ``CHAT_BASE_URL`` / ``MAX_TOKENS``.
 
     Args:
         model_name: Model identifier to look up.
@@ -44,10 +44,42 @@ def _resolve_provider_config(model_name: str) -> tuple[SecretStr, str, Dict[str,
         ``(api_key, base_url, token_limit)`` triple.
     """
     override = settings.LLM_PROVIDER_OVERRIDES.get(model_name, {})
+    token_limit: Dict[str, Any] = {"max_completion_tokens": override.get("max_tokens", settings.MAX_TOKENS)}
+    # Thinking mode is a footgun for agentic use. It (a) refuses
+    # tool_choice="required"/object — which breaks LangChain's
+    #     function_calling structured-output method with a 400 error, and
+    # (b) sometimes emits only the reasoning chain in `content`, leaving the
+    #     JSON payload empty — which breaks json_mode parsing.
+    # Disabling thinking yields stable, parseable structured output for the
+    # SDLC agents. Non-thinking providers are left untouched.
+    #
+    # The parameter name is provider-specific — they are NOT interchangeable:
+    #   DashScope qwen → `enable_thinking: bool`
+    #   DeepSeek       → `thinking: {"type": "disabled"}` (verified 2026-10-06;
+    #                    DeepSeek silently IGNORES DashScope's `enable_thinking`)
+    if "qwen" in model_name.lower():
+        # allow per-model override of thinking mode (some qwen snapshots e.g.
+        # *-preview force enable_thinking=True and reject False with a 400).
+        _thinking = override.get("enable_thinking", False)
+        token_limit["extra_body"] = {"enable_thinking": _thinking}
+    elif "deepseek" in model_name.lower():
+        # DeepSeek defaults to thinking mode. LangChain does NOT replay
+        # `reasoning_content` when it re-sends the conversation, so ANY
+        # multi-turn tool-calling loop fails with:
+        #   400 "The `reasoning_content` in the thinking mode must be passed
+        #        back to the API."
+        # That is exactly the SDLC coder/tester path (tool-calling agents),
+        # so without this the coder fails on every turn and the supervisor
+        # circuit breaker ends the run with zero code produced.
+        # `reasoning_effort: "none"` is an equivalent alternative.
+        # Override per model via LLM_PROVIDER_OVERRIDES if thinking is wanted
+        # (only safe for single-shot, non-tool-calling calls).
+        _thinking = override.get("thinking", {"type": "disabled"})
+        token_limit["extra_body"] = {"thinking": _thinking}
     return (
-        SecretStr(override.get("api_key", settings.OPENAI_API_KEY)),
-        override.get("base_url", settings.OPENAI_BASE_URL),
-        {"max_completion_tokens": override.get("max_tokens", settings.MAX_TOKENS)},
+        SecretStr(override.get("api_key", settings.CHAT_API_KEY)),
+        override.get("base_url", settings.CHAT_BASE_URL),
+        token_limit,
     )
 
 
@@ -66,12 +98,20 @@ def _build_llm(model_name: str) -> ChatOpenAI:
         token limit, and usage-tracking callback.
     """
     api_key, base_url, token_limit = _resolve_provider_config(model_name)
+    # token_limit may carry extra_body (e.g. qwen thinking disable) alongside
+    # max_completion_tokens.
+    extra = {k: v for k, v in token_limit.items() if k != "max_completion_tokens"}
     return ChatOpenAI(
         model=model_name,
         api_key=api_key,
         base_url=base_url,
         max_completion_tokens=token_limit["max_completion_tokens"],
+        # S-hang fix: bound the underlying HTTP request so a misbehaving
+        # provider (e.g. deepseek via DashScope) cannot hang forever.
+        timeout=settings.LLM_REQUEST_TIMEOUT,
+        max_retries=2,
         callbacks=[usage_callback_handler],
+        **extra,
     )
 
 
@@ -115,12 +155,18 @@ class LLMRegistry:
 
         if kwargs:
             logger.debug("creating_llm_with_custom_args", model_name=model_name, custom_args=list(kwargs.keys()))
-            api_key, base_url, _ = _resolve_provider_config(model_name)
+            api_key, base_url, token_limit = _resolve_provider_config(model_name)
+            extra = {k: v for k, v in token_limit.items() if k != "max_completion_tokens"}
             return ChatOpenAI(
                 model=model_name,
                 api_key=api_key,
                 base_url=base_url,
+                max_completion_tokens=token_limit["max_completion_tokens"],
+                # S-hang fix: bound the underlying HTTP request (see _build_llm).
+                timeout=settings.LLM_REQUEST_TIMEOUT,
+                max_retries=2,
                 callbacks=[usage_callback_handler],
+                **extra,
                 **kwargs,
             )
 

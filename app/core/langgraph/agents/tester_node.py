@@ -3,14 +3,13 @@
 Extracted from the former ``SupervisorGraph._tester_node`` method.
 """
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import Command
 
 from app.core.langgraph.agents.context import (
     AgentContext,
     build_error_command,
-    get_node_metadata,
 )
 from app.core.langgraph.agents.supervisor_node import NodeCallable
 from app.core.logging import logger
@@ -39,16 +38,15 @@ def make_tester_node(ctx: AgentContext) -> NodeCallable:
         test_tools = ctx.registry.get_for_agent("tester")
         tools_by_name = {t.name: t for t in test_tools}
 
-        llm_with_tools = ctx.llm_service.get_llm_for(ctx.model_router.get_model_for("tester")).bind_tools(test_tools)
-
         try:
             with (
                 sdlc_agent_execution_seconds.labels(agent_name="tester", step="testing", status="success").time(),
                 set_llm_context("tester", "testing"),
             ):
-                response = await llm_with_tools.ainvoke(
+                response = await ctx.llm_service.call(
                     messages,
-                    config={"metadata": get_node_metadata("tester", "testing", success=True)},
+                    model_name=ctx.model_router.get_model_for("tester"),
+                    tools=test_tools,
                 )
 
             if response.tool_calls:
@@ -58,7 +56,7 @@ def make_tester_node(ctx: AgentContext) -> NodeCallable:
                 # called from within a graph node — direct ainvoke() does
                 # not have it, causing "Missing required config key 'N/A'
                 # for 'tools'" errors.
-                tool_messages: list[ToolMessage] = []
+                tool_messages: list = []
                 test_output_parts: list[str] = []
                 for tool_call in response.tool_calls:
                     tool_name = tool_call["name"]
@@ -96,21 +94,37 @@ def make_tester_node(ctx: AgentContext) -> NodeCallable:
                 # execution regardless of LLM tool selection.
                 run_tests_called = any(tc["name"] == "run_tests" for tc in response.tool_calls)
                 if not run_tests_called and "run_tests" in tools_by_name:
+                    # The forced call is not part of the LLM's `response.tool_calls`,
+                    # so the result must not be appended as a bare ToolMessage:
+                    # OpenAI-compatible APIs (incl. DeepSeek) reject a `tool`
+                    # message whose tool_call_id is not declared by a preceding
+                    # assistant message ("Messages with role 'tool' must be a
+                    # response to a preceding message with 'tool_calls'").
+                    # Emit the declaring assistant turn first so the pair is valid.
+                    auto_call_id = "auto_run_tests"
+                    auto_call_args = {"thread_id": thread_id, "test_command": "pytest -v", "path": "."}
                     try:
                         run_tests_tool = tools_by_name["run_tests"]
-                        auto_result = await run_tests_tool.ainvoke(
-                            {"thread_id": thread_id, "test_command": "pytest -v", "path": "."},
-                            config=config,
-                        )
+                        auto_result = await run_tests_tool.ainvoke(auto_call_args, config=config)
                         auto_result_str = str(auto_result)
-                        test_output_parts.append(auto_result_str)
-                        tool_messages.append(ToolMessage(content=auto_result_str, tool_call_id="auto_run_tests"))
                         logger.info("sdlc_tester_auto_run_tests", triggered=True)
                     except Exception as auto_err:
-                        err_msg = f"Auto run_tests failed: {auto_err}"
-                        test_output_parts.append(err_msg)
-                        tool_messages.append(ToolMessage(content=err_msg, tool_call_id="auto_run_tests"))
+                        auto_result_str = f"Auto run_tests failed: {auto_err}"
                         logger.error("sdlc_tester_auto_run_tests_failed", error=str(auto_err))
+                    test_output_parts.append(auto_result_str)
+                    tool_messages.append(
+                        AIMessage(
+                            content="Auto-running the test suite to verify the implementation.",
+                            tool_calls=[
+                                {
+                                    "id": auto_call_id,
+                                    "name": "run_tests",
+                                    "args": auto_call_args,
+                                }
+                            ],
+                        )
+                    )
+                    tool_messages.append(ToolMessage(content=auto_result_str, tool_call_id=auto_call_id))
 
                 test_output = "\n".join(test_output_parts)
                 test_results = []

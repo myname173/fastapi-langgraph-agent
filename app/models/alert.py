@@ -12,6 +12,8 @@ from enum import Enum
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
+
 
 class AlertCondition(str, Enum):
     """Direction of the price-cross trigger."""
@@ -20,7 +22,7 @@ class AlertCondition(str, Enum):
     BELOW = "below"  # fire when price falls below threshold
 
 
-class Alert(SQLModel, table=True):
+class Alert(UTCDateTimeMixin, SQLModel, table=True):
     """A user-defined price-breakout alert."""
 
     __tablename__ = "alert"  # pyright: ignore[reportAssignmentType]

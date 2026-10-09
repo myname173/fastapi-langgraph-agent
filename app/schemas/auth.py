@@ -13,10 +13,11 @@ from pydantic import (
 
 from app.utils.sanitization import validate_password_strength
 
+from app.models.base import UTCDateTimeMixin
 from app.schemas.base import BaseResponse
 
 
-class Token(BaseModel):
+class Token(UTCDateTimeMixin, BaseModel):
     """Token model for authentication.
 
     Attributes:

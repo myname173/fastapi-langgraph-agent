@@ -275,6 +275,7 @@ def _build_default_registry() -> ToolRegistry:
     """
     from app.core.langgraph.tools.ask_human import ask_human
     from app.core.langgraph.tools.asset_tools import asset_tools_list
+    from app.core.langgraph.tools.alert_tools import alert_tools_list
     from app.core.langgraph.tools.code_index_tools import code_index_tools_list
     from app.core.langgraph.tools.duckduckgo_search import duckduckgo_search_tool
     from app.core.langgraph.tools.fundamentals_tools import fundamentals_tools_list
@@ -283,9 +284,11 @@ def _build_default_registry() -> ToolRegistry:
     from app.core.langgraph.tools.media_tools import media_tools_list
     from app.core.langgraph.tools.news_tools import news_tools_list
     from app.core.langgraph.tools.chart_tools import chart_tools_list
+    from app.core.langgraph.tools.portfolio_tools import portfolio_tools_list
     from app.core.langgraph.tools.quote_tools import quote_tools_list
     from app.core.langgraph.tools.research_debate_tools import research_debate_tools_list
     from app.core.langgraph.tools.sdlc_tools import sdlc_tools_list
+    from app.core.langgraph.tools.watchlist_tools import watchlist_tools_list
 
     registry = ToolRegistry()
 
@@ -363,18 +366,51 @@ def _build_default_registry() -> ToolRegistry:
             tags={"knowledge", "rag"},
         )
 
+    # -- Watchlist tool (chat agent reads the user's 自选股) --------------
+    # Gated by ENABLE_WATCHLIST — lets the advisor factor the user's own
+    # tracked symbols into its answers; invisible to the LLM when off.
+    for wl_tool in watchlist_tools_list:
+        registry.register(
+            wl_tool,
+            agents={"chat"},
+            requires={"ENABLE_WATCHLIST"},
+            tags={"finance", "personalisation"},
+        )
+
+    # -- Portfolio tool (chat agent reads the user's 组合/持仓) -----------
+    # Gated by ENABLE_PORTFOLIO — lets the advisor answer "我的持仓怎么样".
+    for pf_tool in portfolio_tools_list:
+        registry.register(
+            pf_tool,
+            agents={"chat"},
+            requires={"ENABLE_PORTFOLIO"},
+            tags={"finance", "personalisation"},
+        )
+
+    # -- Price-alert tool (chat agent reads the user's 价格预警) ----------
+    # Gated by ENABLE_ALERT — lets the advisor answer "我设了哪些预警".
+    for al_tool in alert_tools_list:
+        registry.register(
+            al_tool,
+            agents={"chat"},
+            requires={"ENABLE_ALERT"},
+            tags={"finance", "personalisation"},
+        )
+
     # -- SDLC tools ------------------------------------------------------
     # Agent-to-tool mapping mirrors the former hard-coded bindings in
     # supervisor.py _coder_node and _tester_node.
     coder_only = {
-        "read_file",
         "write_file",
         "edit_file",
         "search_code_index",
         "update_code_index_file",
         "apply_multi_file_edits",
     }
-    coder_and_tester = {"list_directory", "search_code"}
+    # read_file is needed by BOTH coder and tester: the tester agent routinely
+    # inspects generated source (e.g. read_file) before/after running tests, so
+    # omitting it produced "Unknown tool: read_file" failures at the tester step.
+    coder_and_tester = {"read_file", "list_directory", "search_code"}
 
     for tool in sdlc_tools_list:
         agents: set[str] = set()
@@ -427,8 +463,16 @@ def _build_default_registry() -> ToolRegistry:
     # -- Media generation tools (coder can generate images/videos) -------
     # Thin wrappers around MediaGenerationService — let the coder create
     # visual assets autonomously when a task requires them.
+    # Gated by ENABLE_MEDIA_GENERATION: when off the coder never sees these
+    # tools, so wan2.6-t2i / wan2.7-t2v are never called. Mirrors the
+    # /media endpoint gating in app/api/v1/api.py.
     for tool in media_tools_list:
-        registry.register(tool, agents={"coder"}, tags={"media"})
+        registry.register(
+            tool,
+            agents={"coder"},
+            requires={"ENABLE_MEDIA_GENERATION"},
+            tags={"media"},
+        )
 
     # -- Asset management tools (coder persists URLs + declares previews) --
     # download_asset: persist temporary remote URLs (e.g. generate_image

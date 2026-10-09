@@ -147,6 +147,8 @@ class LLMService:
         *,
         cacheable: bool = ...,
         cache_user_id: Optional[str] = ...,
+        bind_tools: bool = ...,
+        tools: Optional[List] = ...,
         **model_kwargs: Any,
     ) -> BaseMessage: ...
 
@@ -159,6 +161,8 @@ class LLMService:
         response_format: Type[T],
         cacheable: bool = ...,
         cache_user_id: Optional[str] = ...,
+        bind_tools: bool = ...,
+        tools: Optional[List] = ...,
         **model_kwargs: Any,
     ) -> T: ...
 
@@ -170,6 +174,8 @@ class LLMService:
         *,
         cacheable: bool = False,
         cache_user_id: Optional[str] = None,
+        bind_tools: bool = True,
+        tools: Optional[List] = None,
         **model_kwargs: Any,
     ) -> Union[BaseMessage, BaseModel]:
         """Call the LLM with retries and circular fallback.
@@ -191,6 +197,18 @@ class LLMService:
                 non-deterministic and must not be cached).
             cache_user_id: User ID for per-user cache scoping.  Required when
                 ``cacheable`` is ``True`` to avoid cross-user cache pollution.
+            bind_tools: When ``True`` (default), bind ``self._bound_tools`` to
+                the model so tool calling works. Callers that don't need tools
+                (e.g. intent classification, research debate) should pass
+                ``False`` to avoid sending tool definitions to models that may
+                not support them.
+            tools: Explicit tool list to bind for this call, overriding
+                ``self._bound_tools``. Agent nodes (coder, tester) need an
+                agent-scoped tool subset rather than the global registry, and
+                must route through here — **not** through
+                ``get_llm_for(...).bind_tools(...).ainvoke()`` — so the call is
+                retried, falls back across models, and is written to the
+                ``llm_execution`` audit trail.
             **model_kwargs: Extra kwargs forwarded to ``LLMRegistry.get`` when
                 constructing a one-off model instance (e.g. ``temperature``,
                 ``max_tokens``, ``reasoning``).
@@ -224,7 +242,7 @@ class LLMService:
 
         try:
             result = await asyncio.wait_for(
-                self._call_with_fallback(messages, model_name, response_format, model_kwargs),
+                self._call_with_fallback(messages, model_name, response_format, model_kwargs, bind_tools, tools),
                 timeout=settings.LLM_TOTAL_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -379,7 +397,14 @@ class LLMService:
             )
             raise
 
-    def _build_target(self, idx: int, response_format: Optional[Type[BaseModel]], model_kwargs: dict) -> Any:
+    def _build_target(
+        self,
+        idx: int,
+        response_format: Optional[Type[BaseModel]],
+        model_kwargs: dict,
+        bind_tools: bool = True,
+        tools: Optional[List] = None,
+    ) -> Any:
         """Build a runnable for a given registry index.
 
         For the default path (no kwargs/format override) this also binds
@@ -390,15 +415,50 @@ class LLMService:
             idx: Index into ``LLMRegistry.LLMS``.
             response_format: Optional Pydantic schema for structured output.
             model_kwargs: Extra kwargs for the model constructor.
+            bind_tools: When ``True`` (default), bind tools to the model.
+                Pass ``False`` for calls that don't need tools (e.g. intent
+                classification, debate) — especially when the target model
+                may not support tool calling.
+            tools: Explicit tool list to bind instead of ``self._bound_tools``.
+                Used by agent nodes that need an agent-scoped tool subset
+                (coder → file tools, tester → test tools).
 
         Returns:
             A LangChain ``Runnable`` ready to invoke.
         """
         base = LLMRegistry.get(LLMRegistry.LLMS[idx]["name"], **model_kwargs)
         if response_format:
-            return base.with_structured_output(response_format)
-        if self._bound_tools and not model_kwargs:
-            return base.bind_tools(self._bound_tools)
+            # Choose the structured-output method per model. function_calling is
+            # the most reliable parser (the model returns tool_calls that LangChain
+            # validates strictly against the Pydantic schema). However, some
+            # compatible endpoints (deepseek via DashScope) HANG under
+            # function_calling, so for those we fall back to json_mode — which
+            # returns raw JSON our call_llm_structured recovery path can parse.
+            model_name = LLMRegistry.LLMS[idx]["name"]
+            if "deepseek" in model_name.lower() or "kimi" in model_name.lower():
+                # deepseek (via DashScope) HANGS under function_calling, and kimi-k2
+                # emits unstable tool_calls under its default thinking mode — both
+                # surface as a None parse and crash the agent. json_mode returns raw
+                # JSON that call_llm_structured's recovery path can parse reliably.
+                try:
+                    return base.with_structured_output(response_format, method="json_mode")
+                except (TypeError, ValueError):
+                    return base.with_structured_output(response_format)
+            try:
+                return base.with_structured_output(response_format, method="function_calling")
+            except (TypeError, ValueError):
+                pass
+            try:
+                # Fallback for models without native function calling support.
+                return base.with_structured_output(response_format, method="json_mode")
+            except (TypeError, ValueError):
+                # Last resort: runnables whose with_structured_output() accepts no
+                # `method` kwarg at all (older LangChain versions, test doubles).
+                return base.with_structured_output(response_format)
+        if bind_tools:
+            selected_tools = tools if tools is not None else self._bound_tools
+            if selected_tools:
+                return base.bind_tools(selected_tools)
         return base
 
     def _advance_healthy_pointer(self, success_idx: int) -> None:
@@ -422,6 +482,8 @@ class LLMService:
         model_name: Optional[str],
         response_format: Optional[Type[BaseModel]],
         model_kwargs: dict,
+        bind_tools: bool = True,
+        tools: Optional[List] = None,
     ) -> Union[BaseMessage, BaseModel]:
         """Build per-call strategy and delegate to the shared fallback loop.
 
@@ -437,7 +499,7 @@ class LLMService:
         """
 
         def get_target(idx: int) -> Any:
-            return self._build_target(idx, response_format, model_kwargs)
+            return self._build_target(idx, response_format, model_kwargs, bind_tools, tools)
 
         is_model_override = bool(model_name)
         requested_model = model_name or settings.DEFAULT_LLM_MODEL

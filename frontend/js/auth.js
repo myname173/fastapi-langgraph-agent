@@ -44,7 +44,7 @@
       var email = this.email.value.trim();
       var password = this.password.value;
       API.login(email, password)
-        .then(function (userToken) { return API.createSession(userToken); })
+        .then(function (userToken) { return Auth._acquireSession(userToken); })
         .then(function () { if (Auth.onAuthed) Auth.onAuthed(); })
         .catch(function (err) { showError(err.message); })
         .then(function () { btn.disabled = false; });
@@ -59,11 +59,33 @@
       var email = this.email.value.trim();
       var password = this.password.value;
       API.register(email, password, username || null)
-        .then(function (userToken) { return API.createSession(userToken); })
+        .then(function (userToken) { return Auth._acquireSession(userToken); })
         .then(function () { if (Auth.onAuthed) Auth.onAuthed(); })
         .catch(function (err) { showError(err.message); })
         .then(function () { btn.disabled = false; });
     });
+  };
+
+  /* Acquire a session token after auth. Resume the user's most recent
+   * conversation (ChatGPT-style) instead of creating a new empty session on
+   * every login. The old createSession-on-login behavior spawned a storm of
+   * empty "新对话" sessions — one per tunnel-reconnect re-login — and left
+   * the user staring at a blank chat surface, unable to see their recent
+   * messages (which lived in a previous session).
+   *
+   * We pick the newest session that has a non-empty name (i.e. has messages,
+   * since maybe_name_session names a thread after its first turn); only when
+   * no prior conversation exists do we create a new one. listSessions is
+   * newest-first (backend orders by created_at DESC), so named[0] is the
+   * most recent real conversation. */
+  Auth._acquireSession = function (userToken) {
+    return API.listSessions()
+      .then(function (sessions) {
+        var named = (sessions || []).filter(function (s) { return s && s.name; });
+        if (named.length > 0) return API.resumeSession(named[0].session_id);
+        return API.createSession(userToken);
+      })
+      .catch(function () { return API.createSession(userToken); }); // network hiccup — fall back to new session
   };
 
   /* ---- Ripple micro-interaction ---- */

@@ -40,6 +40,28 @@ curl -sI http://localhost:8000/        # 应返回 index.html (200, text/html)
 
 ## 4. 公网 HTTPS（cloudflared 隧道，已配）
 
+两条通道，**指向的后端不同**，别搞混：
+
+| 通道 | 启动方式 | 指向 | 说明 |
+|---|---|---|---|
+| 桌面快捷隧道（生产，一键） | 双击 `tunnel\start-tunnel-prod.bat` | `http://localhost:8010` | **会先把 db + app 拉起来**（若未运行），等 `/health` 变绿后再开隧道 |
+| 桌面快捷隧道（dev） | 双击 `tunnel\start-tunnel.bat` | `http://localhost:8000` | 只开隧道，暴露 `make dev` 的 uvicorn |
+| Docker profile | `docker compose --profile tunnel up cloudflared` | 容器内 `http://app:8000` | 全容器化，不需要本地 exe |
+
+`start-tunnel-prod.bat` 的流程：探测 8010 → 没起来就
+`docker compose --env-file .env.production up -d db app` → 轮询 `/health` 最多 180s →
+交给 `start-tunnel.bat` 拿到公网 URL。它**只起 db + app**（app 仅依赖 db）；
+vllm / prometheus / grafana / cadvisor / mcp 等较重的服务不会被拉起，需要时自行启动。
+需要 Docker Desktop 已在运行。
+
+> **端口提醒**：`docker compose ps` 里 app 容器发布在宿主 **127.0.0.1:8010**，
+> 而 `start-tunnel.bat` 默认是 **8000**（那是 `make dev` 的 uvicorn 监听口）。
+> 想暴露生产容器就显式传端口：`start-tunnel.bat 8010`。
+
+桌面隧道首次运行会自动下载 `cloudflared.exe`（约 53MB，走 gh-proxy 镜像，速度约
+150–240 KB/s，请耐心等）。脚本会用 `cloudflared.exe --version` 校验二进制是否可用，
+损坏会自动删除并重下；下载过程请勿关闭窗口。
+
 ```bash
 # 快速隧道（随机域名，重启失效）：
 docker compose --env-file .env.production --profile tunnel up cloudflared
@@ -53,6 +75,15 @@ docker compose logs cloudflared | grep trycloudflare   # 拿到 https://*.tryclo
 # 4. Cloudflare 控制台绑定子域名 → http://app:8000
 # 5. docker compose --profile tunnel up -d cloudflared
 ```
+
+> ⚠️ **`tunnel/*.bat` 必须保持 CRLF 换行。** cmd.exe 解析 LF-only 的 .bat 会逐行吃掉
+> 开头字符（`setlocal` → `tlocal`、`echo` → `ho`），含 `if (...) else (...)` 括号块的
+> 脚本会整体失效，报一片 "不是内部或外部命令"。`.gitattributes` 已强制
+> `*.bat text eol=crlf`；用编辑器或 AI 改写后，请确认换行仍是 CRLF。
+>
+> 另外：**请双击运行，不要在 Git Bash 里跑**。Git Bash 的 `find` / `timeout` 会盖过
+> Windows 同名命令，导致 `find: '/i': No such file or directory` 之类噪声，等待循环也会
+> 退化（`timeout /t 3` 报 invalid time interval）。在 Explorer 里双击不受影响。
 
 同源访问，`ALLOWED_ORIGINS` 无需加入隧道域名。
 

@@ -69,6 +69,7 @@
     Sidebar.features.portfolio = true;
     Sidebar.features.risk = true;
     Sidebar.features.alert = true;
+    Sidebar.features.knowledge = true;
     Sidebar.mount(container);
     Sidebar.initFeatures().then(function () {
       if (Sidebar.el) {
@@ -358,34 +359,45 @@
     var imgs = scope.querySelectorAll('img[src^="/charts/"]');
     for (var i = 0; i < imgs.length; i++) {
       (function (img) {
-        var alt = img.getAttribute("alt") || "图表";
-        var card = document.createElement("div");
-        card.className = "fin-chart";
-        var head = document.createElement("div");
-        head.className = "fin-chart-title";
-        var titleSpan = document.createElement("span");
-        titleSpan.textContent = alt;
-        var srcSpan = document.createElement("span");
-        srcSpan.className = "fin-source";
-        srcSpan.textContent = "图表 · 数据生成";
-        head.appendChild(titleSpan);
-        head.appendChild(srcSpan);
-        card.appendChild(head);
-        card.appendChild(img);
-        img.addEventListener("error", function () {
-          if (this.parentNode) {
-            var fb = document.createElement("div");
-            fb.className = "fin-chart-fallback";
-            fb.textContent = "图表加载失败，请稍后重试或查看数据原文。";
-            this.parentNode.replaceChild(fb, this);
+        try {
+          var alt = img.getAttribute("alt") || "图表";
+          var card = document.createElement("div");
+          card.className = "fin-chart";
+          var head = document.createElement("div");
+          head.className = "fin-chart-title";
+          var titleSpan = document.createElement("span");
+          titleSpan.textContent = alt;
+          var srcSpan = document.createElement("span");
+          srcSpan.className = "fin-source";
+          srcSpan.textContent = "图表 · 数据生成";
+          head.appendChild(titleSpan);
+          head.appendChild(srcSpan);
+          card.appendChild(head);
+          // Capture the image's original position BEFORE moving it into the
+          // card. Reading img.parentNode after appendChild(img) returns the
+          // card itself, which made the old code call card.insertBefore(card,
+          // img) -> HierarchyRequestError, leaving the chart detached (i.e.
+          // invisible) and aborting the rest of the enhancement pass.
+          var parent = img.parentNode;
+          var next = img.nextSibling;
+          card.appendChild(img);
+          img.addEventListener("error", function () {
+            if (this.parentNode) {
+              var fb = document.createElement("div");
+              fb.className = "fin-chart-fallback";
+              fb.textContent = "图表加载失败，请稍后重试或查看数据原文。";
+              this.parentNode.replaceChild(fb, this);
+            }
+          });
+          if (parent && parent.tagName === "P" && parent.parentNode) {
+            parent.parentNode.insertBefore(card, parent);
+            parent.parentNode.removeChild(parent);
+          } else if (parent) {
+            parent.insertBefore(card, next);
           }
-        });
-        var p = img.parentNode;
-        if (p && p.tagName === "P") {
-          p.parentNode.insertBefore(card, p);
-          p.parentNode.removeChild(p);
-        } else {
-          img.parentNode.insertBefore(card, img);
+        } catch (e) {
+          // Never let one chart break the whole message render.
+          if (window.console && console.warn) console.warn("enhanceCharts failed", e);
         }
       })(imgs[i]);
     }

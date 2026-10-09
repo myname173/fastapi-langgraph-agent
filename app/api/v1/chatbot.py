@@ -138,33 +138,79 @@ async def chat_stream(
                 )
 
         async def event_generator():
-            """Generate streaming events.
+            """Generate streaming events with Cloudflare 524 keepalives.
 
-            Yields:
-                str: Server-sent events in JSON format.
+            Yields ``data: <json>`` frames for content/tool events plus
+            ``: keepalive`` SSE comment frames every SSE_KEEPALIVE_SEC seconds
+            of idle. The keepalive prevents Cloudflare Quick Tunnel HTTP 524
+            (origin timeout) during the pre-stream prep (memory search + intent
+            classification, which run before the first LLM token) and during
+            slow LLM/tool gaps. Comment frames are ignored by the browser SSE
+            parser (api.js readSSE only processes ``data:`` lines), so they
+            are invisible to the UI.
 
             Raises:
                 Exception: If there's an error during streaming.
             """
             try:
+                # Immediate first byte so Cloudflare sees a response body
+                # before the memory/intent prep blocks for the first token.
+                yield ": keepalive\n\n"
+
                 with llm_stream_duration_seconds.labels(model=agent.llm_service.get_llm().get_name()).time():
-                    async for chunk in agent.get_stream_response(
-                        chat_request.messages,
-                        session.id,
-                        user_id=str(session.user_id),
-                        username=session.username,
-                        images=chat_request.images,
-                    ):
-                        if isinstance(chunk, dict):
-                            response = StreamResponse(
-                                content="",
-                                done=False,
-                                type=chunk.get("type", "tool"),
-                                label=chunk.get("label"),
-                            )
-                        else:
-                            response = StreamResponse(content=chunk, done=False)
-                        yield f"data: {json.dumps(response.model_dump(mode='json'))}\n\n"
+                    queue: asyncio.Queue = asyncio.Queue()
+                    sentinel = object()
+
+                    async def _produce() -> None:
+                        try:
+                            async for chunk in agent.get_stream_response(
+                                chat_request.messages,
+                                session.id,
+                                user_id=str(session.user_id),
+                                username=session.username,
+                                images=chat_request.images,
+                            ):
+                                await queue.put(chunk)
+                        except Exception as exc:
+                            await queue.put(exc)
+                        finally:
+                            await queue.put(sentinel)
+
+                    producer = asyncio.create_task(_produce())
+                    try:
+                        while True:
+                            try:
+                                item = await asyncio.wait_for(
+                                    queue.get(),
+                                    timeout=settings.SSE_KEEPALIVE_SEC,
+                                )
+                            except asyncio.TimeoutError:
+                                # No chunk within the keepalive window — send
+                                # a comment frame to keep the Cloudflare edge
+                                # connection alive (prevents HTTP 524).
+                                yield ": keepalive\n\n"
+                                continue
+                            if item is sentinel:
+                                break
+                            if isinstance(item, Exception):
+                                raise item
+                            if isinstance(item, dict):
+                                response = StreamResponse(
+                                    content="",
+                                    done=False,
+                                    type=item.get("type", "tool"),
+                                    label=item.get("label"),
+                                )
+                            else:
+                                response = StreamResponse(content=item, done=False)
+                            yield f"data: {json.dumps(response.model_dump(mode='json'))}\n\n"
+                    finally:
+                        if not producer.done():
+                            producer.cancel()
+                            try:
+                                await producer
+                            except (asyncio.CancelledError, Exception):
+                                pass
 
                 # Send final message indicating completion
                 final_response = StreamResponse(content="", done=True)

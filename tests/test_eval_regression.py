@@ -135,13 +135,10 @@ def _build_coder_ctx(task: GoldenTask) -> tuple[AgentContext, list[MagicMock]]:
 
     ai_response = AIMessage(content="", tool_calls=_golden_tool_calls(task))
 
-    bound = MagicMock()
-    bound.ainvoke = AsyncMock(return_value=ai_response)
-    mock_llm = MagicMock()
-    mock_llm.bind_tools = MagicMock(return_value=bound)
-
+    # The coder node calls ``llm_service.call(messages, model_name=..., tools=...)``
+    # (audited path) rather than ``get_llm_for(...).bind_tools(...).ainvoke(...)``.
     mock_llm_service = MagicMock()
-    mock_llm_service.get_llm_for = MagicMock(return_value=mock_llm)
+    mock_llm_service.call = AsyncMock(return_value=ai_response)
 
     mock_registry = MagicMock()
     mock_registry.get_for_agent = MagicMock(return_value=mock_tools)

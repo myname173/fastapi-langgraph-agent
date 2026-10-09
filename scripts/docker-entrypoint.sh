@@ -48,12 +48,21 @@ else
     echo "Warning: No .env file found. Using system environment variables."
 fi
 
-# Check required sensitive environment variables
-required_vars=("JWT_SECRET_KEY" "OPENAI_API_KEY")
+# Check required sensitive environment variables.
+#
+# 2026-10-06: the single OPENAI_API_KEY was split into two role-named keys
+# (see .env.production "LLM Settings — 双 provider 拆分"):
+#   CHAT_API_KEY      -> chat / LLM provider        (e.g. DeepSeek)
+#   EMBEDDING_API_KEY -> /embeddings provider       (e.g. Alibaba Bailian)
+# OPENAI_API_KEY is kept as a legacy single-provider fallback: if it is set,
+# it implicitly covers both (config.py falls back the same way).
+required_vars=("JWT_SECRET_KEY" "CHAT_API_KEY" "EMBEDDING_API_KEY")
 
 # Support Docker secrets _FILE convention: if VAR is empty but VAR_FILE
-# points to a readable file, load VAR from that file.
-for var in "${required_vars[@]}"; do
+# points to a readable file, load VAR from that file. OPENAI_API_KEY is
+# included so its legacy _FILE form still resolves.
+file_backed_vars=("CHAT_API_KEY" "EMBEDDING_API_KEY" "OPENAI_API_KEY")
+for var in "${file_backed_vars[@]}"; do
     file_var="${var}_FILE"
     if [[ -z "${!var}" && -n "${!file_var}" && -f "${!file_var}" ]]; then
         export "$var=$(cat "${!file_var}")"
@@ -69,12 +78,18 @@ for var in "${required_vars[@]}"; do
     fi
 done
 
+# Legacy single-provider fallback: OPENAI_API_KEY covers both role-named keys.
+if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    missing_vars=()
+fi
+
 if [[ ${#missing_vars[@]} -gt 0 ]]; then
     echo "ERROR: The following required environment variables are missing:"
     for var in "${missing_vars[@]}"; do
         echo "  - $var"
     done
-    echo "Please provide these variables through environment or .env files."
+    echo "Provide them via Docker secrets (CHAT_API_KEY_FILE / EMBEDDING_API_KEY_FILE),"
+    echo "the CHAT_API_KEY / EMBEDDING_API_KEY env vars, or the legacy OPENAI_API_KEY."
     exit 1
 fi
 
@@ -88,6 +103,8 @@ echo "Database Name: $( [[ -n ${POSTGRES_DB:-${DB_NAME:-}} ]] && echo 'set' || e
 echo "Database User: $( [[ -n ${POSTGRES_USER:-${DB_USER:-}} ]] && echo 'set' || echo 'Not set' )"
 
 echo "LLM Model: ${DEFAULT_LLM_MODEL:-Not set}"
+echo "Chat provider base URL: ${CHAT_BASE_URL:-${OPENAI_BASE_URL:-Not set}}"
+echo "Embedding provider base URL: ${EMBEDDING_BASE_URL:-${OPENAI_BASE_URL:-Not set}}"
 echo "Debug Mode: ${DEBUG:-false}"
 
 # Run database migrations on every boot. `alembic upgrade head` is

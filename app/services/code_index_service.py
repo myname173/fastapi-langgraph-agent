@@ -54,23 +54,33 @@ class CodeIndexService:
                             "port": settings.POSTGRES_PORT,
                             # Must match embedder's embedding_dims — see
                             # memory.py for the same fix. PGVectorConfig
-                            # defaults to 1536, but text-embedding-v3 uses 1024.
+                            # defaults to 1536, but qwen3.7-text-embedding uses 1024.
                             "embedding_model_dims": settings.LONG_TERM_MEMORY_EMBEDDING_DIM,
                         },
                     },
                     "llm": {
                         "provider": "openai",
-                        "config": {"model": settings.LONG_TERM_MEMORY_MODEL},
+                        "config": {
+                            "model": settings.LONG_TERM_MEMORY_MODEL,
+                            # Explicit key + base_url: mem0 otherwise falls back
+                            # to os.getenv("OPENAI_API_KEY"), which stays empty
+                            # because this project injects keys via Docker
+                            # secrets. Same rationale as memory.py.
+                            "api_key": settings.CHAT_API_KEY,
+                            "openai_base_url": settings.CHAT_BASE_URL,
+                        },
                     },
                     "embedder": {
                         "provider": "openai",
                         "config": {
                             "model": settings.LONG_TERM_MEMORY_EMBEDDER_MODEL,
-                            # Required for Bailian text-embedding-v3 (1024 dims).
+                            # Required for Bailian qwen3.7-text-embedding (1024 dims).
                             # Without embedding_dims, mem0 defaults to 1536
-                            # and the embedding API rejects with 400:
-                            # "dimension for embedding v3 is invalid".
+                            # and the embedding API rejects with 400.
                             "embedding_dims": settings.LONG_TERM_MEMORY_EMBEDDING_DIM,
+                            # Code chunk vectors → EMBEDDING provider.
+                            "api_key": settings.EMBEDDING_API_KEY,
+                            "openai_base_url": settings.EMBEDDING_BASE_URL,
                         },
                     },
                 }

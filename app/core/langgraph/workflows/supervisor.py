@@ -21,6 +21,8 @@ Key changes from the legacy monolithic ``graphs/supervisor.py``:
 
 import asyncio
 import base64
+import os
+import sys
 import time
 from typing import Any, AsyncGenerator, List, Optional, cast
 
@@ -28,6 +30,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import convert_to_openai_messages
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -118,14 +121,45 @@ class SupervisorGraph:
                 graph_builder.add_edge("reviewer", "supervisor")
                 graph_builder.add_edge("tester", "supervisor")
 
-                connection_pool = await init_pool()
-                if connection_pool:
-                    checkpointer = AsyncPostgresSaver(connection_pool)
-                    await checkpointer.setup()
-                else:
+                # 初始化 Postgres checkpointer；失败时按环境降级：
+                # - 非生产环境一律降级为内存版（MemorySaver），保证流程可运行；
+                # - 生产环境若显式设置 SDLC_EVAL_LOCAL=1（本地无 PG 的评测场景），
+                #   同样降级为 MemorySaver，避免整体失败（生产正常 PG 可用时不触发）。
+                checkpointer = None
+                try:
+                    if sys.platform == "win32":
+                        import psycopg
+
+                        conn = psycopg.connect(
+                            host=settings.POSTGRES_HOST,
+                            port=settings.POSTGRES_PORT,
+                            user=settings.POSTGRES_USER,
+                            password=settings.POSTGRES_PASSWORD,
+                            dbname=settings.POSTGRES_DB,
+                            connect_timeout=10,
+                        )
+                        checkpointer = AsyncPostgresSaver(conn)
+                        await checkpointer.setup()
+                    else:
+                        connection_pool = await init_pool()
+                        if connection_pool:
+                            checkpointer = AsyncPostgresSaver(connection_pool)
+                            await checkpointer.setup()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "sdlc_checkpointer_init_failed_falling_back",
+                        error=str(exc)[:200],
+                        fallback="memory",
+                    )
                     checkpointer = None
-                    if settings.ENVIRONMENT != Environment.PRODUCTION:
-                        raise Exception("Connection pool initialization failed")
+
+                if checkpointer is None:
+                    local_eval = os.getenv("SDLC_EVAL_LOCAL", "0") == "1"
+                    if settings.ENVIRONMENT != Environment.PRODUCTION or local_eval:
+                        checkpointer = MemorySaver()
+                        logger.info("sdlc_checkpointer_using_memory_saver")
+                    elif settings.ENVIRONMENT == Environment.PRODUCTION:
+                        raise Exception("Postgres checkpointer initialization failed")
 
                 self._graph = graph_builder.compile(
                     checkpointer=checkpointer,
@@ -291,7 +325,13 @@ class SupervisorGraph:
                 # this passed {"messages": [...]} which added a second
                 # copy of the requirements to the checkpoint's message
                 # list on every resume (e.g. after approval).
-                response = await graph.ainvoke(None, config=config)
+                # S-5 fix: bound the whole graph invocation with a hard timeout
+                # so a misbehaving model (e.g. hanging structured-output calls)
+                # cannot pin the task indefinitely.
+                response = await asyncio.wait_for(
+                    graph.ainvoke(None, config=config),
+                    timeout=settings.SDLC_WORKFLOW_TIMEOUT_SEC,
+                )
             else:
                 initial_state = self._build_initial_state(
                     requirements,
@@ -301,7 +341,10 @@ class SupervisorGraph:
                     coder_model=coder_model,
                 )
                 initial_state["image_contexts"] = await self._process_images(images or [], session_id)
-                response = await graph.ainvoke(initial_state, config=config)
+                response = await asyncio.wait_for(
+                    graph.ainvoke(initial_state, config=config),
+                    timeout=settings.SDLC_WORKFLOW_TIMEOUT_SEC,
+                )
 
             workflow_duration = time.time() - start_time
             is_complete = response.get("is_complete", False)

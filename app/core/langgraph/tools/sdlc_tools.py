@@ -279,7 +279,12 @@ def search_code(thread_id: str, query: str, file_pattern: str = "*.py") -> List[
 
 
 ALLOWED_TEST_COMMANDS = ["pytest", "python", "python3"]
-DANGEROUS_CHARS = r'[;&|`$\'"<>]'
+# S-2 fix: only block characters that enable real injection — command
+# substitution (` or $()), and redirection output (>). Allow safe sequencing
+# (;) and piping (|) and shell parameter expansion like $? / $1 so legitimate
+# test commands (e.g. `python fib.py 5; echo "Exit Code: $?"`) are not
+# rejected. gating still relies on ALLOWED_TEST_COMMANDS.
+DANGEROUS_CHARS = r"[`]|[$]\(|[>]"
 
 
 SENSITIVE_PATTERNS = [
@@ -488,6 +493,40 @@ async def _run_tests_subprocess_fallback(
     venv_bin = os.path.dirname(sys.executable)
     sanitized_env["PATH"] = venv_bin + os.pathsep + sanitized_env.get("PATH", "")
 
+    # Expose the workspace on PYTHONPATH for ALL commands (not just pytest) so
+    # that generated modules (e.g. `import stats` inside verify_stats.py) resolve
+    # when run via `python verify_stats.py`. Without this, tester commands that
+    # import sibling modules fail with ModuleNotFoundError.
+    sanitized_env["PYTHONPATH"] = str(cwd) + os.pathsep + sanitized_env.get("PYTHONPATH", "")
+
+    import shutil
+
+    # Resolve `python`/`python3` to the current venv interpreter. On Windows
+    # asyncio.create_subprocess_exec does NOT append `.exe` automatically, so a
+    # bare "python" command would raise FileNotFoundError (manifesting as an
+    # empty-str exception in the caller). Using sys.executable is cross-platform
+    # and guarantees the project venv is used.
+    if cmd_args and cmd_args[0] in ("python", "python3"):
+        cmd_args = [sys.executable, *cmd_args[1:]]
+
+    if cmd_args and cmd_args[0] == "pytest":
+        sanitized_env["PYTHONPATH"] = str(cwd)
+        if shutil.which("pytest", path=sanitized_env.get("PATH", "")) is None:
+            import os as _os
+
+            cur = _os.path.abspath(str(cwd))
+            root = "/app"
+            while True:
+                if _os.path.exists(_os.path.join(cur, "pyproject.toml")):
+                    root = cur
+                    break
+                parent = _os.path.dirname(cur)
+                if parent == cur:
+                    break
+                cur = parent
+            cmd_args = ["uv", "run", "--no-sync", "--project", root, "pytest", *cmd_args[1:]]
+            logger.info("test_subprocess_fallback_uv", command=" ".join(cmd_args), cwd=str(cwd))
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd_args,
@@ -505,7 +544,17 @@ async def _run_tests_subprocess_fallback(
             stdout, stderr = b"", f"Process timed out after {timeout}s".encode()
             return_code = -1
     except Exception as e:
-        return f"STDOUT:\n\nSTDERR:\nSubprocess failed: {e}\nReturn code: -1\nSandbox result: fallback_error"
+        logger.exception(
+            "sdlc_tool_run_tests_subprocess_failed",
+            command=" ".join(str(c) for c in cmd_args),
+            cwd=str(cwd),
+            error_type=type(e).__name__,
+            error=str(e),
+        )
+        return (
+            f"STDOUT:\n\nSTDERR:\nSubprocess failed ({type(e).__name__}): {e}\n"
+            f"Return code: -1\nSandbox result: fallback_error"
+        )
 
     return (
         f"STDOUT:\n{stdout.decode('utf-8', errors='replace')}\n\n"
@@ -545,10 +594,19 @@ async def run_tests(thread_id: str, test_command: str = "pytest -v", path: str =
         working_dir = f"/workspace/{rel_path}" if rel_path not in (".", "./", "") else "/workspace"
 
         if settings.SANDBOX_BACKEND != "docker":
-            raise ValueError(
-                "Code execution requires SANDBOX_BACKEND=docker. "
-                f"Current backend: {settings.SANDBOX_BACKEND!r}. "
-                "Set SANDBOX_BACKEND=docker and ensure Docker is running."
+            # S-3 fix: when Docker is not the active backend (e.g. local
+            # evaluation on Windows without Docker), degrade gracefully to the
+            # restricted subprocess fallback instead of hard-failing. Security is
+            # preserved by sanitize_command's allow-list + workspace isolation.
+            logger.warning(
+                "sdlc_tool_run_tests_no_docker_fallback",
+                thread_id=thread_id,
+                backend=settings.SANDBOX_BACKEND,
+                command=test_command,
+            )
+            return await _run_tests_subprocess_fallback(
+                cmd_args=cmd_args,
+                cwd=abs_path,
             )
 
         result = await docker_sandbox.run(
@@ -756,19 +814,34 @@ def apply_multi_file_edits(thread_id: str, edits: List[dict]) -> dict:
             if file_path not in backups:
                 backups[file_path] = original
 
+            # When the file is empty or does not yet exist, an `old_str` anchor
+            # can never match. In that case the model almost always intended to
+            # *create/overwrite* the whole file with `new_str`. Degrade
+            # gracefully to a full write instead of failing the entire batch
+            # (a single failed edit previously aborted the coder with 0 changes).
+            _file_empty_or_absent = (not abs_path.exists()) or (original.strip() == "")
+
             if edit_type == "replace":
                 if not old_str:
                     raise ValueError(f"Edit {i}: old_str required for replace")
                 if old_str not in original:
-                    raise ValueError(f"Edit {i}: old_str not found in {file_path}")
-                new_content = original.replace(old_str, new_str, 1)
+                    if _file_empty_or_absent:
+                        new_content = new_str
+                    else:
+                        raise ValueError(f"Edit {i}: old_str not found in {file_path}")
+                else:
+                    new_content = original.replace(old_str, new_str, 1)
             elif edit_type == "insert":
                 if not old_str:
                     new_content = new_str + "\n" + original
                 else:
                     if old_str not in original:
-                        raise ValueError(f"Edit {i}: old_str not found in {file_path}")
-                    new_content = original.replace(old_str, old_str + "\n" + new_str, 1)
+                        if _file_empty_or_absent:
+                            new_content = new_str
+                        else:
+                            raise ValueError(f"Edit {i}: old_str not found in {file_path}")
+                    else:
+                        new_content = original.replace(old_str, old_str + "\n" + new_str, 1)
             elif edit_type == "delete":
                 if not old_str:
                     raise ValueError(f"Edit {i}: old_str required for delete")

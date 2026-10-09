@@ -1,4 +1,19 @@
-"""Goal API endpoints for cross-session long-term objective tracking."""
+"""Goal API endpoints for cross-session long-term objective tracking.
+
+SCOPE: this is an **SDLC-side** feature. A ``Goal`` groups ``SDLCTask`` rows
+(see ``goal_service.get_tasks_by_goal``) so the Coder/SDLC orchestrator can
+track a multi-task objective across sessions. It is NOT an investment goal.
+
+Do not confuse it with the investor chat-advisor's *investment* objectives,
+which live on ``risk_profile.investment_goals`` (see
+``app/api/v1/risk_profile.py``) and are injected into the chat prompt by
+``app/core/langgraph/graph.py``. Because the two are unrelated, no chat tool
+exposes ``Goal`` to the investor agent — that would feed SDLC task goals to
+the advisor as if they were investment objectives.
+
+Registered unconditionally (no feature flag) — it is inert for users who
+never create an SDLC task.
+"""
 
 import uuid
 from typing import List

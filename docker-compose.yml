@@ -42,7 +42,7 @@ services:
       args:
         APP_ENV: ${APP_ENV:-production}
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8010:8000"
     volumes:
       - ./app:/app/app
       - ./frontend:/app/frontend
@@ -52,12 +52,16 @@ services:
       - ./scripts:/app/scripts
     env_file:
       - .env.${APP_ENV:-production}
-    # Docker secrets — real API key is mounted read-only at
-    # /run/secrets/openai_api_key. config.py reads it via
-    # OPENAI_API_KEY_FILE (set in .env.production). Falls back to
-    # OPENAI_API_KEY env var for local `make dev` runs without Docker.
+    # Docker secrets — provider keys are mounted read-only at
+    # /run/secrets/<name>. config.py reads them via CHAT_API_KEY_FILE /
+    # EMBEDDING_API_KEY_FILE (set in .env.production). Falls back to the
+    # CHAT_API_KEY / EMBEDDING_API_KEY env vars for local `make dev` runs
+    # without Docker.
+    #   chat_api_key      → chat/LLM provider        (e.g. DeepSeek)
+    #   embedding_api_key → /embeddings provider     (e.g. Alibaba Bailian)
     secrets:
-      - openai_api_key
+      - chat_api_key
+      - embedding_api_key
     environment:
       - APP_ENV=${APP_ENV:-production}
       # tiktoken BPE cache: pre-cached in ./tiktoken_cache (mounted at
@@ -97,8 +101,16 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      # TSDB lives here. Without this, samples live in the container's writable
+      # layer and every `docker compose up -d` / image pull silently wipes the
+      # entire metric history.
+      - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      # Default retention is only 15d. The Grafana dashboards default to a
+      # 1-month window; 45d covers it with headroom and keeps the TSDB near
+      # ~1.5GB (measured ~35MB/day) instead of growing to ~6GB at 180d.
+      - '--storage.tsdb.retention.time=45d'
     networks:
       - monitoring
     restart: always
@@ -112,6 +124,7 @@ services:
       - grafana-storage:/var/lib/grafana
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./grafana/dashboards/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=h0dg7WRQ7zfYBz5vh7ARZQ
       - GF_USERS_ALLOW_SIGN_UP=false
@@ -316,6 +329,7 @@ networks:
 
 volumes:
   grafana-storage:
+  prometheus-data:
   postgres-data:
   valkey-data:
   mcp_data:
@@ -324,5 +338,7 @@ volumes:
 # The source file on the host is gitignored (see secrets/.gitignore).
 # Inside the container the secret is available at /run/secrets/<name>.
 secrets:
-  openai_api_key:
-    file: ./secrets/openai_api_key.txt
+  chat_api_key:
+    file: ./secrets/chat_api_key.txt
+  embedding_api_key:
+    file: ./secrets/embedding_api_key.txt

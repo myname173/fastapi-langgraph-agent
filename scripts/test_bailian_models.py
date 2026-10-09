@@ -125,13 +125,13 @@ def probe(api_key: str, base_url: str, model: str) -> tuple[bool, str]:
 
 def main() -> int:
     """Run the Bailian model test suite and print results."""
-    key = os.getenv("OPENAI_API_KEY", "")
+    key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY", "")
     base = os.getenv(
-        "OPENAI_BASE_URL",
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "EMBEDDING_BASE_URL",
+        "https://ws-jsbo0s00m9tnj2xv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     )
     if not key:
-        print("OPENAI_API_KEY not set", file=sys.stderr)
+        print("EMBEDDING_API_KEY (or OPENAI_API_KEY) not set", file=sys.stderr)
         return 2
 
     print(f"Key prefix={key[:12]}... len={len(key)}")

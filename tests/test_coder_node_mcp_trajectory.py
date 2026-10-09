@@ -12,8 +12,8 @@ Verifies that the coder node, when given an LLM response containing an
 
 CI-safe: no real LLM, no real MCP server, no docker dependency, no
 prometheus port. The MCP tool is mocked via ``MagicMock`` with
-``ainvoke = AsyncMock(...)``; the LLM is mocked via a fully mocked
-``ctx.llm_service.get_llm_for(...).bind_tools(...).ainvoke(...)`` chain.
+``ainvoke = AsyncMock(...)``; the LLM is mocked via
+``ctx.llm_service.call`` (the audited entry point the coder node uses).
 ``prometheus_client.REGISTRY`` is sampled in-memory to assert counter
 deltas — no real Prometheus scrape needed.
 
@@ -82,14 +82,12 @@ def _build_ctx_with_mcp_tool(
     Returns:
         AgentContext with fully mocked services.
     """
-    # Mock the bind_tools → ainvoke chain.
-    bound = MagicMock()
-    bound.ainvoke = AsyncMock(return_value=llm_response)
-    mock_llm = MagicMock()
-    mock_llm.bind_tools = MagicMock(return_value=bound)
-
+    # Mock the audited LLM call. The coder node routes through
+    # ``llm_service.call(messages, model_name=..., tools=...)`` rather than
+    # ``get_llm_for(...).bind_tools(...).ainvoke(...)`` so that every agent
+    # LLM call lands in the ``llm_execution`` audit trail.
     mock_llm_service = MagicMock()
-    mock_llm_service.get_llm_for = MagicMock(return_value=mock_llm)
+    mock_llm_service.call = AsyncMock(return_value=llm_response)
 
     mock_registry = MagicMock()
     # coder_node calls registry.get_for_agent("coder") to build file_tools.
@@ -177,9 +175,11 @@ class TestCoderNodeMcpTrajectoryHappyPath:
     """Verify successful MCP tool invocation path."""
 
     async def test_mcp_query_tasks_invoked_and_metric_incremented(self):
-        """LLM emits ``mcp_query_tasks`` tool_call → coder_node invokes the
-        tool, appends a ToolMessage with the result, increments the success
-        metric, and returns ``Command(goto="supervisor")``.
+        """A single ``mcp_query_tasks`` tool_call is executed end to end.
+
+        The LLM emits the tool_call, coder_node invokes the tool, appends a
+        ToolMessage with the result, increments the success metric, and returns
+        ``Command(goto="supervisor")``.
         """
         # 1. Build a fake MCP tool that returns a deterministic JSON payload.
         mcp_tool = _mcp_tool(
@@ -187,9 +187,9 @@ class TestCoderNodeMcpTrajectoryHappyPath:
             return_value='[{"id": "t-001", "status": "completed"}]',
         )
 
-        # 2. Build an AIMessage with one tool_call. ToolCall shape:
-        #    {"name": str, "args": dict, "id": str, "type": "tool_call"}
-        #    (see langchain_core.messages.tool.ToolCall TypedDict).
+        # 2. Build an AIMessage with one tool_call. A ToolCall has the fields
+        #    name (str), args (dict), id (str) and type ("tool_call") — see the
+        #    ToolCall TypedDict in langchain_core.messages.tool.
         ai_response = AIMessage(
             content="",
             tool_calls=[
@@ -246,9 +246,10 @@ class TestCoderNodeMcpTrajectoryFanOut:
     """Verify multiple MCP tool invocations in one LLM response."""
 
     async def test_multiple_mcp_tools_in_single_response(self):
-        """LLM emits 2 ``mcp_*`` tool_calls in one AIMessage → both invoked,
-        both success metrics incremented, 2 ToolMessages in update, tool_call_ids
-        not mixed up.
+        """Two ``mcp_*`` tool_calls in one AIMessage are both executed.
+
+        Both success metrics are incremented and 2 ToolMessages are returned,
+        with tool_call_ids kept unambiguous.
         """
         mcp_tool_a = _mcp_tool("mcp_git_log", return_value="abc123 HEAD")
         mcp_tool_b = _mcp_tool("mcp_query_tasks", return_value='[{"id": "t-002"}]')
@@ -311,7 +312,7 @@ class TestCoderNodeMcpTrajectoryFailure:
     """Verify MCP tool failure is properly recorded and surfaced."""
 
     async def test_mcp_tool_exception_increments_failed_metric(self):
-        """When the MCP tool raises, coder_node must:
+        """Required behaviour when the MCP tool raises.
 
         - NOT re-raise (swallow the exception, write error ToolMessage)
         - increment ``mcp_tool_calls_total{tool, status="failed"}``

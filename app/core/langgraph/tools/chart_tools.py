@@ -33,37 +33,80 @@ def _parse_data(data: str) -> tuple[list[str], list[float]]:
 
 
 def _svg_bar(title: str, labels: list[str], values: list[float]) -> str:
+    """Render a bar chart around a shared zero baseline.
+
+    Bars grow up from (positive) or down to (negative) a common zero line,
+    so losses / negative returns are drawn *below* the baseline. The old
+    implementation scaled by ``max(values)`` and always drew upward, which
+    for an all-negative series produced negative ``y`` and a height far
+    taller than the viewBox (bars clipped out of frame).
+    """
     w, h = 480, 300
     if not values:
-        return f'<svg width="{w}" height="{h}"></svg>'
-    max_v = max(values) or 1.0
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"></svg>'
+
     n = len(values)
     gap = 20
+    top, bottom = 44, h - 40  # plot area; leaves room for title + x labels
+    plot_h = bottom - top
+
+    # Always include zero so the baseline is meaningful; guard a flat series.
+    hi = max(max(values), 0.0)
+    lo = min(min(values), 0.0)
+    span = (hi - lo) or 1.0
+
+    def y_of(v: float) -> float:
+        return top + (hi - v) / span * plot_h
+
+    zero_y = y_of(0.0)
     bw = (w - 2 * gap - (n - 1) * 10) / max(n, 1)
+
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">']
     parts.append(f'<text x="{w // 2}" y="20" text-anchor="middle">{title}</text>')
-    base_y = h - 40
+    parts.append(
+        f'<line x1="{gap}" y1="{zero_y:.1f}" x2="{w - gap}" y2="{zero_y:.1f}" stroke="#94a3b8" stroke-width="1" />'
+    )
+
     for i, (lab, val) in enumerate(zip(labels, values, strict=False)):
         x = gap + i * (bw + 10)
-        bh = (val / max_v) * (base_y - 40)
-        parts.append(f'<rect x="{x:.0f}" y="{base_y - bh:.0f}" width="{bw:.0f}" height="{bh:.0f}" fill="#3b82f6" />')
-        parts.append(f'<text x="{x + bw / 2:.0f}" y="{base_y + 16}" text-anchor="middle" font-size="10">{lab}</text>')
+        yv = y_of(val)
+        y_top = min(yv, zero_y)
+        bar_h = abs(yv - zero_y)
+        # Match the app's own convention (.fin-up = green, .fin-down = red).
+        fill = "#2dd4bf" if val >= 0 else "#f87171"
+        parts.append(f'<rect x="{x:.0f}" y="{y_top:.0f}" width="{bw:.0f}" height="{bar_h:.0f}" fill="{fill}" />')
+        # Value label sits just past the bar's outer end: above the bar for
+        # positives, inside the bar (near its bottom) for negatives, so it
+        # never collides with the x-axis label.
+        vy = yv - 6
+        parts.append(
+            f'<text x="{x + bw / 2:.0f}" y="{vy:.0f}" text-anchor="middle" '
+            f'font-size="10" fill="#475569">{val:g}</text>'
+        )
+        parts.append(
+            f'<text x="{x + bw / 2:.0f}" y="{bottom + 16}" text-anchor="middle" '
+            f'font-size="10" fill="#334155">{lab}</text>'
+        )
     parts.append("</svg>")
     return "".join(parts)
 
 
 def _svg_pie(title: str, labels: list[str], values: list[float]) -> str:
     w = h = 320
-    if not values or sum(values) <= 0:
-        return f'<svg width="{w}" height="{h}"></svg>'
+    if not values:
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"></svg>'
     cx, cy, r = w // 2, h // 2 + 10, 110
-    total = sum(values)
+    # A pie shows each slice's share of the whole; use |value| so negative
+    # numbers (e.g. losses) still render instead of producing negative angles.
+    total = sum(abs(v) for v in values)
+    if total <= 0:
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"></svg>'
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">']
     parts.append(f'<text x="{w // 2}" y="20" text-anchor="middle">{title}</text>')
     colors = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#06b6d4"]
     angle = -math.pi / 2
     for i, (_lab, val) in enumerate(zip(labels, values, strict=False)):
-        frac = val / total
+        frac = abs(val) / total
         a2 = angle + 2 * math.pi * frac
         large = 1 if 2 * math.pi * frac > math.pi else 0
         x1, y1 = cx + r * math.cos(angle), cy + r * math.sin(angle)

@@ -84,7 +84,7 @@ class KnowledgeBaseService:
                             "port": settings.POSTGRES_PORT,
                             # Must match embedder's embedding_dims — see
                             # memory.py for the same fix. PGVectorConfig
-                            # defaults to 1536, but text-embedding-v3 uses 1024.
+                            # defaults to 1536, but qwen3.7-text-embedding uses 1024.
                             "embedding_model_dims": settings.LONG_TERM_MEMORY_EMBEDDING_DIM,
                         },
                     },
@@ -92,8 +92,9 @@ class KnowledgeBaseService:
                         "provider": "openai",
                         "config": {
                             "model": settings.LONG_TERM_MEMORY_MODEL,
-                            "api_key": settings.OPENAI_API_KEY,
-                            "openai_base_url": settings.OPENAI_BASE_URL,
+                            # Fact-extraction LLM → CHAT provider.
+                            "api_key": settings.CHAT_API_KEY,
+                            "openai_base_url": settings.CHAT_BASE_URL,
                         },
                     },
                     "embedder": {
@@ -101,8 +102,11 @@ class KnowledgeBaseService:
                         "config": {
                             "model": settings.LONG_TERM_MEMORY_EMBEDDER_MODEL,
                             "embedding_dims": settings.LONG_TERM_MEMORY_EMBEDDING_DIM,
-                            "api_key": settings.OPENAI_API_KEY,
-                            "openai_base_url": settings.OPENAI_BASE_URL,
+                            # Document chunk vectors → EMBEDDING provider.
+                            # May be a different vendor than chat (DeepSeek has
+                            # no /embeddings endpoint).
+                            "api_key": settings.EMBEDDING_API_KEY,
+                            "openai_base_url": settings.EMBEDDING_BASE_URL,
                         },
                     },
                 }

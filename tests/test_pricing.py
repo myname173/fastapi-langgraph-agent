@@ -22,13 +22,13 @@ class TestGetModelPricing:
 
     def test_known_model_returns_table_entry(self):
         """A model in MODEL_PRICING_USD_PER_1M returns its exact entry."""
-        pricing = get_model_pricing("qwen3.7-plus")
-        assert pricing == MODEL_PRICING_USD_PER_1M["qwen3.7-plus"]
+        pricing = get_model_pricing("qwen3.7-plus-2026-05-26")
+        assert pricing == MODEL_PRICING_USD_PER_1M["qwen3.7-plus-2026-05-26"]
         assert pricing == {"input": 0.4, "output": 1.2}
 
     def test_known_coder_model(self):
-        """qwen3-coder-plus is in the table (coding specialist tier)."""
-        pricing = get_model_pricing("qwen3-coder-plus")
+        """kimi-k2.7-code is in the table (coding specialist tier)."""
+        pricing = get_model_pricing("kimi-k2.7-code")
         assert pricing == {"input": 0.4, "output": 1.2}
 
     def test_known_max_model(self):
@@ -60,24 +60,24 @@ class TestCalculateCostUsd:
 
     def test_zero_tokens_returns_zero(self):
         """No tokens consumed → zero cost."""
-        assert calculate_cost_usd("qwen3.7-plus", 0, 0) == 0.0
+        assert calculate_cost_usd("qwen3.7-plus-2026-05-26", 0, 0) == 0.0
 
     def test_only_prompt_tokens(self):
         """Input-only call: cost = prompt_tokens * input_rate / 1M."""
         # qwen3.7-plus input = $0.4 per 1M → 1M tokens = $0.4
-        cost = calculate_cost_usd("qwen3.7-plus", 1_000_000, 0)
+        cost = calculate_cost_usd("qwen3.7-plus-2026-05-26", 1_000_000, 0)
         assert cost == pytest.approx(0.4)
 
     def test_only_completion_tokens(self):
         """Output-only call: cost = completion_tokens * output_rate / 1M."""
         # qwen3.7-plus output = $1.2 per 1M → 1M tokens = $1.2
-        cost = calculate_cost_usd("qwen3.7-plus", 0, 1_000_000)
+        cost = calculate_cost_usd("qwen3.7-plus-2026-05-26", 0, 1_000_000)
         assert cost == pytest.approx(1.2)
 
     def test_mixed_tokens_summed_correctly(self):
         """Both input and output contribute to the total cost."""
         # 500K input @ 0.4/1M = $0.2; 250K output @ 1.2/1M = $0.3 → total $0.5
-        cost = calculate_cost_usd("qwen3.7-plus", 500_000, 250_000)
+        cost = calculate_cost_usd("qwen3.7-plus-2026-05-26", 500_000, 250_000)
         assert cost == pytest.approx(0.5)
 
     def test_max_tier_model_pricing(self):
@@ -102,22 +102,22 @@ class TestCalculateCostUsd:
         This test documents the current behavior.
         """
         # Both non-positive → short-circuit returns 0.0
-        assert calculate_cost_usd("qwen3.7-plus", -100, -50) == 0.0
+        assert calculate_cost_usd("qwen3.7-plus-2026-05-26", -100, -50) == 0.0
         # Mixed: -100 prompt + 1M completion → -100 * 0.4/1M + 1.2 ≈ 1.19996
-        cost = calculate_cost_usd("qwen3.7-plus", -100, 1_000_000)
+        cost = calculate_cost_usd("qwen3.7-plus-2026-05-26", -100, 1_000_000)
         assert cost == pytest.approx(1.2 - 100 * 0.4 / 1_000_000)
 
     def test_small_token_count_is_small_cost(self):
         """Typical agent call: ~1K input + 500 output → cents, not dollars."""
-        cost = calculate_cost_usd("qwen3.7-plus", 1_000, 500)
+        cost = calculate_cost_usd("qwen3.7-plus-2026-05-26", 1_000, 500)
         # 1000 * 0.4/1M + 500 * 1.2/1M = 0.0004 + 0.0006 = 0.001
         assert cost == pytest.approx(0.001)
         assert cost < 0.01  # less than a cent
 
     def test_return_type_is_float(self):
         """Return value is always a float (not int)."""
-        assert isinstance(calculate_cost_usd("qwen3.7-plus", 0, 0), float)
-        assert isinstance(calculate_cost_usd("qwen3.7-plus", 100, 50), float)
+        assert isinstance(calculate_cost_usd("qwen3.7-plus-2026-05-26", 0, 0), float)
+        assert isinstance(calculate_cost_usd("qwen3.7-plus-2026-05-26", 100, 50), float)
 
     def test_all_table_models_compute_without_error(self):
         """Every model in the pricing table can compute a cost without raising."""

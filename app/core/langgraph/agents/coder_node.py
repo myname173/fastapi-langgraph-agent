@@ -20,10 +20,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import Command
 
 from app.core.config import settings
-from app.core.langgraph.agents.context import (
-    AgentContext,
-    get_node_metadata,
-)
+from app.core.langgraph.agents.context import AgentContext
 from app.core.langgraph.agents.supervisor_node import NodeCallable
 from app.core.logging import logger
 from app.core.metrics import (
@@ -35,6 +32,42 @@ from app.core.prompts import load_agent_prompt
 from app.schemas import CoderOutput, SDLCState
 from app.services.llm.usage_tracker import set_llm_context
 from app.utils import prepare_sdlc_messages
+
+# Tools that actually mutate the workspace. Only these may contribute a
+# ``code_changes`` entry for the UI/state; read-only tools (read_file,
+# list_directory, search_code, git_diff, …) must not, otherwise a pure
+# inspection pass is reported as a code change with empty content.
+_FILE_MUTATING_TOOLS = frozenset(
+    {
+        "write_file",
+        "edit_file",
+        "apply_multi_file_edits",
+        "save_output_file",
+        "generate_and_run_script",
+    }
+)
+
+
+def _normalise_change_type(edit_type: object) -> str:
+    """Map a ``CodeEdit.edit_type`` onto a valid ``FileChange.change_type``.
+
+    The two schemas use deliberately different vocabularies: an *edit* is
+    ``replace`` / ``insert`` / ``create`` / ``delete``, whereas a *file change*
+    reported to the API/UI is only ``create`` / ``modify`` / ``delete``.
+    Copying one into the other verbatim produced ``change_type="replace"``,
+    which fails ``SDLCResponse`` validation at serialisation time and turns an
+    otherwise successful workflow into an HTTP 500.
+
+    Anything that is not an explicit create/delete is a modification, which is
+    the correct user-facing description for replace/insert (and for any
+    unexpected value, so a novel edit type can never break the response).
+    """
+    value = str(edit_type or "").strip().lower()
+    if value == "create":
+        return "create"
+    if value == "delete":
+        return "delete"
+    return "modify"
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +334,7 @@ async def _apply_smart_edits_and_validate(
             code_changes_data = [
                 {
                     "file_path": e.file_path,
-                    "change_type": e.edit_type,
+                    "change_type": _normalise_change_type(e.edit_type),
                     "content": e.new_str,
                     "commit_message": f"fallback (smart edit failed): {e.edit_type}",
                 }
@@ -443,7 +476,7 @@ def _extract_code_fallback(content: str) -> list[dict]:
                 return [
                     {
                         "file_path": e.file_path,
-                        "change_type": e.edit_type,
+                        "change_type": _normalise_change_type(e.edit_type),
                         "content": e.new_str,
                         "commit_message": f"fallback (extracted from code block): {e.edit_type}",
                     }
@@ -511,9 +544,8 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
         # Per-task coder model override (SDLC coder model selection feature).
         # state["coder_model"] is set by the API layer from SDLCRequest.coder_model
         # and persisted in the checkpoint, so reject->rerun keeps the same model.
-        # None => fall back to the router default (qwen3-coder-plus).
+        # None => fall back to the router default (kimi-k2.7-code).
         model_name = state.get("coder_model") or ctx.model_router.get_model_for("coder")
-        llm_with_tools = ctx.llm_service.get_llm_for(model_name).bind_tools(file_tools)
 
         try:
             thread_id = config.get("configurable", {}).get("thread_id", "default")
@@ -543,9 +575,10 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
                 sdlc_agent_execution_seconds.labels(agent_name="coder", step="coding", status="success").time(),
                 set_llm_context("coder", "coding"),
             ):
-                response = await llm_with_tools.ainvoke(
+                response = await ctx.llm_service.call(
                     messages,
-                    config={"metadata": get_node_metadata("coder", "coding", success=True)},
+                    model_name=model_name,
+                    tools=file_tools,
                 )
 
             if response.tool_calls:
@@ -581,6 +614,29 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
                             if tool_name.startswith("mcp_"):
                                 mcp_tool_calls_total.labels(tool=tool_name, status="failed").inc()
                     else:
+                        # C-2 fix: defensive fallback for tools missing from the
+                        # agent-scoped subset but present in the global registry
+                        # (e.g. apply_multi_file_edits). Resolve programmatically
+                        # so a model-requested tool is not silently rejected.
+                        fallback_tool = None
+                        try:
+                            if hasattr(ctx, "registry") and ctx.registry.has(tool_name):
+                                fallback_tool = ctx.registry.get_by_name(tool_name)
+                        except Exception:
+                            fallback_tool = None
+                        if fallback_tool is not None:
+                            try:
+                                result = await fallback_tool.ainvoke(args, config=config)
+                                tool_messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
+                                continue
+                            except Exception as fb_err:
+                                tool_messages.append(
+                                    ToolMessage(
+                                        content=f"Tool {tool_name} failed: {fb_err}",
+                                        tool_call_id=tool_call["id"],
+                                    )
+                                )
+                                continue
                         tool_messages.append(
                             ToolMessage(
                                 content=f"Unknown tool: {tool_name}",
@@ -593,18 +649,20 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
                             mcp_tool_calls_total.labels(tool=tool_name, status="failed").inc()
 
                     # Construct code_changes for UI display (from tool_call args).
+                    # Read-only tools contribute nothing — recording them would
+                    # surface empty "changes" for files the coder merely read.
                     if tool_name == "apply_multi_file_edits":
                         edits = args.get("edits", [])
                         for edit in edits:
                             code_changes.append(
                                 {
                                     "file_path": edit.get("file_path", ""),
-                                    "change_type": edit.get("edit_type", "replace"),
+                                    "change_type": _normalise_change_type(edit.get("edit_type")),
                                     "content": edit.get("new_str", ""),
                                     "commit_message": f"smart edit: {edit.get('edit_type', 'replace')}",
                                 }
                             )
-                    else:
+                    elif tool_name in _FILE_MUTATING_TOOLS:
                         change_type = "create" if "create" in tool_name or "write" in tool_name else "modify"
                         code_changes.append(
                             {
@@ -615,25 +673,82 @@ def make_coder_node(ctx: AgentContext) -> NodeCallable:
                             }
                         )
 
-                logger.info("sdlc_coder_tool_calls", tool_call_count=len(response.tool_calls))
-
-                return Command(
-                    update={
-                        "messages": [response] + tool_messages,
-                        "code_changes": code_changes,
-                        "status": "coding",
-                    },
-                    goto="supervisor",
+                logger.info(
+                    "sdlc_coder_tool_calls",
+                    tool_call_count=len(response.tool_calls),
+                    code_change_count=len(code_changes),
                 )
+
+                update: dict[str, Any] = {
+                    "messages": [response] + tool_messages,
+                    "code_changes": code_changes,
+                    "status": "coding",
+                }
+                if not code_changes:
+                    # The turn only inspected the workspace (read_file /
+                    # list_directory / search_code …) and wrote nothing. Without
+                    # a retry budget the supervisor guard (plan present, code
+                    # empty) bounces straight back here forever, spinning until
+                    # recursion_limit. Mirror the no-code guard used by the
+                    # non-tool-call path so the circuit breaker can trip instead.
+                    current_retry = state.get("coder_retry_count", 0) + 1
+                    update["coder_retry_count"] = current_retry
+                    update["errors"] = state.get("errors", []) + [
+                        {
+                            "agent_name": "coder",
+                            "content": (
+                                f"Coder inspected the workspace but produced no file "
+                                f"changes (retry {current_retry}/{settings.MAX_CODER_RETRIES})"
+                            ),
+                            "severity": "medium",
+                        }
+                    ]
+
+                return Command(update=update, goto="supervisor")
 
             # Layer 3: Post-processing — parse output, apply smart edits,
             # validate, count retries, escalate to human approval.
             parse_failure_retry = 0  # set in except block when parse fails
             try:
-                parsed = CoderOutput.model_validate_json(response.content)
+                # C-1 fix: DashScope-compatible mode may wrap the JSON in a
+                # fenced code block or prepend reasoning text. Extract the bare
+                # JSON blob before validation instead of parsing raw content.
+                from langchain_core.exceptions import OutputParserException as _OPE
+
+                from app.core.langgraph.agents.context import (
+                    _recover_from_parse_error,
+                )
+
+                _raw = response.content if isinstance(response.content, str) else ""
+                try:
+                    parsed = CoderOutput.model_validate_json(_raw)
+                except Exception as _first_err:
+                    # Compatible-mode providers occasionally return a bare JSON
+                    # array instead of the {plan,edits,code_changes} wrapper. Try
+                    # to recover by wrapping the array into the first matching
+                    # List-typed field (e.g. plan / edits / code_changes).
+                    _recovered = _recover_from_parse_error(
+                        _OPE(f"coder parse failed: {_first_err}", llm_output=_raw),
+                        response_format=CoderOutput,
+                        agent_name="coder",
+                        step="coder_output",
+                    )
+                    if _recovered is not None:
+                        parsed = _recovered
+                    else:
+                        raise _first_err
                 code_changes_data, validation_results, needs_approval = await _apply_smart_edits_and_validate(
                     ctx, thread_id, parsed, config, state.get("coder_retry_count", 0)
                 )
+                # A recovered CoderOutput may contain only a `plan` (the model
+                # emitted planning steps instead of actual code edits). Treat a
+                # parsed result with no real file/code edits as a failed parse so
+                # the supervisor circuit breaker can retry rather than shipping
+                # empty/invalid "code" into the tests.
+                if not code_changes_data and (
+                    not getattr(parsed, "edits", None) and not getattr(parsed, "code_changes", None)
+                ):
+                    raise ValueError("CoderOutput has plan but no edits/code_changes")
             except Exception as parse_err:
                 # Parsing or smart-edit failed. Previously this swallowed
                 # everything and returned code_changes=[] — making the

@@ -1,177 +1,197 @@
-"""Media Studio — image/video generation and history."""
+"""Media Studio component.
 
-import time
+Provides a Streamlit UI for text-to-image generation and a history view of
+previously generated media. Video generation is intentionally **not** exposed
+in the UI — generated videos were not reliably mapped to the originating
+feature/role, so the video tab has been removed to avoid showing unrelated
+media.
+
+Images are tagged with the feature/role they were generated for (inferred
+from the prompt) and can be re-run ("续跑") once quota is available, so a user
+can resume a task from the generated picture.
+"""
 
 import streamlit as st
 
 from ui.api_client import SDLCAPIClient
 
+# Keyword → feature/role mapping used to label generated images. Order matters:
+# the first matching rule wins. Extend as new agent roles / features are added.
+ROLE_RULES = [
+    ("coder", ["代码", "code", "bug", "函数", "function", "脚本", "script", "后端", "backend", "api"]),
+    ("reviewer", ["审查", "review", "评审", "测试", "test", "质量", "quality"]),
+    ("researcher", ["研究", "research", "调研", "分析", "analysis", "搜索", "search"]),
+    ("frontend", ["前端", "frontend", "ui", "界面", "页面", "网页", "component"]),
+    ("architecture", ["架构", "architecture", "设计图", "拓扑", "topology", "系统图", "diagram"]),
+    ("design", ["设计", "design", "logo", "海报", "poster", "配色", "视觉", "visual"]),
+    ("product", ["产品", "product", "需求", "prd", "原型", "prototype"]),
+]
+
+
+def _infer_role(prompt: str) -> str:
+    """Infer the feature/role a prompt belongs to, from keyword rules.
+
+    Falls back to "general" when no rule matches.
+    """
+    if not prompt:
+        return "general"
+    text = prompt.lower()
+    for role, keywords in ROLE_RULES:
+        for kw in keywords:
+            if kw.lower() in text:
+                return role
+    return "general"
+
+
+ROLE_LABELS = {
+    "coder": "💻 编码 (coder)",
+    "reviewer": "🔍 审查 (reviewer)",
+    "researcher": "📚 研究 (researcher)",
+    "frontend": "🎨 前端 (frontend)",
+    "architecture": "🏗️ 架构 (architecture)",
+    "design": "✨ 设计 (design)",
+    "product": "📦 产品 (product)",
+    "general": "🧩 通用 (general)",
+}
+
+
+def _role_badge(prompt: str) -> str:
+    """Return the human-readable role label for a prompt."""
+    return ROLE_LABELS.get(_infer_role(prompt), ROLE_LABELS["general"])
+
+
+def _queue_rerun(prompt: str) -> None:
+    """Store a prompt so the Image tab picks it up and regenerates it (续跑)."""
+    st.session_state["media_rerun_prompt"] = prompt
+    st.session_state["media_tab"] = "Image"
+    st.rerun()
+
+
+def tab_image(client: SDLCAPIClient):
+    """Text-to-image generation tab.
+
+    Pre-fills the prompt box when a 续跑 (re-run) request is queued from
+    history, so the user can regenerate the same image once quota allows.
+    """
+    st.subheader("🖼️ Text to Image")
+
+    queued = st.session_state.get("media_rerun_prompt")
+    default_prompt = queued if queued else ""
+
+    prompt = st.text_area(
+        "Prompt",
+        value=default_prompt,
+        height=100,
+        help="描述你想要的图片。生成后会自动标注它对应的功能/角色。",
+        key="media_image_prompt",
+    )
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        n_images = st.number_input("数量", min_value=1, max_value=4, value=1, key="media_image_n")
+    with col2:
+        st.caption("生成完成后，图片会显示其负责的功能/角色，可一键续跑。")
+
+    if st.button("生成图片", key="media_image_btn", use_container_width=True):
+        # Consume any queued re-run prompt so it doesn't sticky-resubmit.
+        st.session_state.pop("media_rerun_prompt", None)
+        if not prompt.strip():
+            st.warning("请输入 prompt")
+            return
+        with st.spinner("生成中…"):
+            result = client.generate_image(prompt=prompt, n_images=n_images)
+        if not result:
+            st.error("生成失败，请稍后重试")
+            return
+        items = result.get("results", [])
+        if not items:
+            st.error(result.get("error", "未返回图片"))
+            return
+        st.success(f"生成完成（{len(items)} 张）")
+        for item in items:
+            _render_image_item(item, prompt)
+
+    # If a re-run was queued but the user hasn't submitted yet, surface a hint.
+    if queued and not st.session_state.get("_media_rerun_hinted"):
+        st.info("已载入续跑 prompt，点击「生成图片」即可重新生成（需额度充足）。")
+        st.session_state["_media_rerun_hinted"] = True
+
+
+def _render_image_item(item: dict, fallback_prompt: str = "") -> None:
+    """Render a single generated image with its role tag and 续跑 button."""
+    image_url = item.get("image_url") or item.get("url")
+    prompt = item.get("prompt") or fallback_prompt
+    role = _role_badge(prompt)
+    cols = st.columns([3, 1])
+    with cols[0]:
+        if image_url:
+            try:
+                st.image(image_url, use_container_width=True)
+            except Exception:
+                st.markdown(f"[查看图片]({image_url})")
+        else:
+            st.warning("图片地址缺失")
+    with cols[1]:
+        st.badge(role, color="blue")
+        if prompt:
+            if st.button("续跑", key=f"rerun_{item.get('id', image_url)}", use_container_width=True):
+                _queue_rerun(prompt)
+
+
+def tab_history(client: SDLCAPIClient):
+    """History of generated media.
+
+    Only images are rendered — video entries are skipped because video
+    generation is no longer exposed in the UI.
+    """
+    st.subheader("📜 生成历史")
+
+    if st.button("刷新", key="media_hist_refresh"):
+        st.session_state.pop("media_history_cache", None)
+
+    cache = st.session_state.get("media_history_cache")
+    if cache is None:
+        with st.spinner("加载历史…"):
+            cache = client.get_media_history(limit=50) or []
+        st.session_state.media_history_cache = cache
+
+    if not cache:
+        st.info("暂无生成记录")
+        return
+
+    image_items = [m for m in cache if m.get("media_type") == "image"]
+    video_items = [m for m in cache if m.get("media_type") == "video"]
+
+    if not image_items:
+        st.info("暂无图片生成记录")
+    else:
+        for item in image_items:
+            prompt = item.get("prompt", "")
+            st.divider()
+            st.badge(_role_badge(prompt), color="blue")
+            st.caption(f"Prompt: {prompt}")
+            _render_image_item(item, prompt)
+
+    if video_items:
+        st.divider()
+        st.caption(f"⚠️ 历史中有 {len(video_items)} 条视频记录，当前界面已不再展示视频，如需查看请前往后端媒体接口。")
+
 
 def render_media_studio():
-    """Render the Media Studio panel for image/video generation.
-
-    Decoupled from SDLC — calls ``client.generate_image`` /
-    ``client.generate_video`` directly. No shared state with the task
-    workflow.
-    """
-    st.subheader("Media Studio")
-    st.caption("Generate images and videos via Bailian wan2.6-t2i / wan2.7-t2v")
+    """Render the Media Studio with image generation and history tabs."""
+    st.header("🎬 Media Studio")
 
     client: SDLCAPIClient = st.session_state.api_client
-    st.session_state.setdefault("media_img_history", [])
-    st.session_state.setdefault("media_vid_history", [])
 
-    tab_image, tab_video, tab_history = st.tabs(["Text to Image", "Text to Video", "History"])
+    # Reset the one-shot re-run hint once we land here.
+    st.session_state.pop("_media_rerun_hinted", None)
 
-    img_examples = [
-        "\u4e00\u53ea\u6a58\u732b\u5750\u5728\u7a97\u53f0\u4e0a\uff0c\u9633\u5149\u6d12\u5728\u6bdb\u53d1\u4e0a\uff0c\u6e29\u99a8\u67d4\u548c",
-        " minimalist UI dashboard, dark theme, blue accents, clean layout",
-        "A samurai standing in a bamboo forest at sunset, cinematic lighting",
-    ]
-    vid_examples = [
-        "\u732b\u54aa\u5728\u9633\u5149\u4e0b\u6253\u76f9\uff0c\u7f13\u6162\u547c\u5438\uff0c\u6e29\u99a8\u5bb6\u5c45\u573a\u666f",
-        "\u57ce\u5e02\u591c\u666f\u5ef6\u65f6\u6444\u5f71\uff0c\u8f66\u6d41\u7a7f\u68ad\uff0c\u9713\u8679\u706f\u95ea\u70c1",
-        "Ocean waves crashing on rocks at golden hour, slow motion",
-    ]
+    if not client.is_authenticated:
+        st.warning("请先登录以使用 Media Studio")
+        return
 
-    with tab_image:
-        with st.expander("Example prompts (click to use)", expanded=False):
-            ex_cols = st.columns(len(img_examples))
-            for col, ex in zip(ex_cols, img_examples, strict=False):
-                if col.button(ex[:30] + "\u2026", key=f"img_ex_{hash(ex)}", help=ex):
-                    st.session_state.media_img_prompt = ex
-
-        img_prompt = st.text_area(
-            "Prompt",
-            key="media_img_prompt",
-            height=80,
-            placeholder="Describe the image you want to generate...",
-        )
-        col1, col2 = st.columns(2)
-        with col1:
-            size_options = {
-                "Square 1024\u00d71024": "1024*1024",
-                "Landscape 1280\u00d7720": "1280*720",
-                "Portrait 720\u00d71280": "720*1280",
-            }
-            size_label = st.selectbox("Size", list(size_options.keys()), key="media_img_size")
-            img_size = size_options[size_label]
-        with col2:
-            img_n = st.number_input("Count", min_value=1, max_value=4, value=1, key="media_img_n")
-
-        if st.button("Generate Image", key="media_img_btn", type="primary", disabled=not img_prompt.strip()):
-            with st.spinner("Generating image..."):
-                result = client.generate_image(img_prompt, img_size, int(img_n))
-            if result and result.get("images"):
-                for url in result["images"]:
-                    st.image(url)
-                    st.download_button(
-                        label="Download image",
-                        data=client.download_bytes(url),
-                        file_name=f"generated_{int(time.time())}.png",
-                        mime="image/png",
-                        key=f"dl_img_{hash(url)}",
-                    )
-                st.session_state.media_img_history = (result["images"] + st.session_state.media_img_history)[:10]
-            else:
-                st.error("Image generation failed. Check Bailian account quota.")
-
-        if st.session_state.media_img_history:
-            st.markdown("**History**")
-            hist_cols = st.columns(min(len(st.session_state.media_img_history), 4))
-            for col, url in zip(hist_cols, st.session_state.media_img_history, strict=False):
-                col.image(url)
-
-    with tab_video:
-        with st.expander("Example prompts (click to use)", expanded=False):
-            ex_cols = st.columns(len(vid_examples))
-            for col, ex in zip(ex_cols, vid_examples, strict=False):
-                if col.button(ex[:30] + "\u2026", key=f"vid_ex_{hash(ex)}", help=ex):
-                    st.session_state.media_vid_prompt = ex
-
-        vid_prompt = st.text_area(
-            "Prompt",
-            key="media_vid_prompt",
-            height=80,
-            placeholder="Describe the video you want to generate...",
-        )
-        col1, col2 = st.columns(2)
-        with col1:
-            vid_duration = st.number_input(
-                "Duration (seconds)", min_value=2, max_value=15, value=5, key="media_vid_dur"
-            )
-        with col2:
-            vid_res = st.selectbox("Resolution", ["720P", "1080P"], key="media_vid_res")
-
-        if st.button("Generate Video", key="media_vid_btn", type="primary", disabled=not vid_prompt.strip()):
-            with st.spinner("Generating video (may take 1-5 minutes)..."):
-                result = client.generate_video(vid_prompt, int(vid_duration), vid_res)
-            if result and result.get("video_url"):
-                st.video(result["video_url"])
-                st.caption(f"Task ID: {result.get('task_id', '')}")
-                st.session_state.media_vid_history = ([result] + st.session_state.media_vid_history)[:5]
-            else:
-                st.error("Video generation failed. Check Bailian account quota.")
-
-        if st.session_state.media_vid_history:
-            st.markdown("**History**")
-            for item in st.session_state.media_vid_history:
-                st.video(item["video_url"])
-                st.caption(f"Task ID: {item.get('task_id', '')}")
-
-    with tab_history:
-        st.markdown("**Generation History** (server-side, L-14)")
-        st.caption(
-            "Persisted across sessions. DashScope image/video URLs expire "
-            "in 24-48h \u2014 expired links will appear but may not load."
-        )
-        col_refresh, col_limit = st.columns([1, 2])
-        with col_refresh:
-            if st.button("Refresh", key="media_hist_refresh"):
-                st.session_state.media_hist_loaded = False
-        with col_limit:
-            hist_limit = st.number_input(
-                "Max results",
-                min_value=10,
-                max_value=200,
-                value=50,
-                step=10,
-                key="media_hist_limit",
-            )
-
-        if not st.session_state.get("media_hist_loaded"):
-            with st.spinner("Loading history..."):
-                st.session_state.media_hist_records = client.fetch_media_history(int(hist_limit))
-            st.session_state.media_hist_loaded = True
-
-        records = st.session_state.get("media_hist_records", [])
-        if not records:
-            st.info("No generation history yet. Generate an image or video to see it here.")
-        else:
-            for r in records:
-                status_icon = "\u2705" if r.get("status") == "success" else "\u274c"
-                type_label = r.get("media_type", "?").upper()
-                ts = r.get("created_at", "")
-                ts_short = ts[:16].replace("T", " ") if ts else ""
-                with st.container(border=True):
-                    header = f"{status_icon} {type_label} \u2014 {ts_short}"
-                    if r.get("model"):
-                        header += f" \u00b7 {r['model']}"
-                    st.markdown(f"**{header}**")
-                    st.write(r.get("prompt", "")[:200])
-                    if r.get("status") == "success":
-                        url = r.get("result_url")
-                        if url:
-                            if type_label == "IMAGE":
-                                st.image(url)
-                            else:
-                                st.video(url)
-                            if r.get("task_id"):
-                                st.caption(f"Task ID: {r['task_id']}")
-                        if r.get("image_count", 0) > 1:
-                            st.caption(f"({r['image_count']} images generated)")
-                    else:
-                        if r.get("error_message"):
-                            st.error(r["error_message"][:300])
-                        if r.get("task_id"):
-                            st.caption(f"Task ID: {r['task_id']} (may still be runnable)")
+    tabs = st.tabs(["Image", "History"])
+    with tabs[0]:
+        tab_image(client)
+    with tabs[1]:
+        tab_history(client)

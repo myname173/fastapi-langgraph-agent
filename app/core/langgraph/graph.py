@@ -1,6 +1,7 @@
 """This file contains the LangGraph Agent/workflow and interactions with the LLM."""
 
 import asyncio
+import re
 import time
 from typing import (
     AsyncGenerator,
@@ -228,6 +229,32 @@ class _ToolEventCollector(BaseCallbackHandler):
         await self._queue.put({"type": "tool", "label": None})
 
 
+# Matches the Markdown image line emitted by the ``generate_chart`` tool, e.g.
+# ``![白酒对比](/charts/chart_ab12cd34.svg)``.
+_CHART_MD_RE = re.compile(r"!\[[^\]]*\]\(/charts/[^\s)]+\)")
+
+
+def _latest_chart_markdown(messages: list) -> Optional[str]:
+    """Return the newest chart image line produced by ``generate_chart``.
+
+    The chart tool returns a Markdown image (``![title](/charts/x.svg)``) so
+    the frontend can render it, but the LLM frequently *paraphrases* the tool
+    output and drops that line from its final answer — the chart then never
+    shows up. Scanning the turn's tool messages lets the caller re-attach the
+    image line verbatim, guaranteeing the chart renders.
+    """
+    for msg in reversed(messages):
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+        if not isinstance(content, str):
+            continue
+        match = _CHART_MD_RE.search(content)
+        if match:
+            return match.group(0)
+    return None
+
+
 class LangGraphAgent:
     """Manages the LangGraph Agent/workflow and interactions with the LLM.
 
@@ -316,9 +343,14 @@ class LangGraphAgent:
         # `classify_chat_intent` now returns IntentResult(intent, tool, symbol).
         # The tool/symbol fields are only populated when intent = TOOL_NEEDED
         # and the local 1.5B classifier parsed them successfully.
-        intent_result: IntentResult | None = None
-        if settings.ENABLE_CHAT_MODEL_ROUTING:
+        #
+        # Streaming path pre-computes intent OUTSIDE the graph (in
+        # get_stream_response) and passes it via config metadata, so the
+        # local 1.5B's output doesn't leak into the SSE stream.
+        intent_result: IntentResult | None = config.get("metadata", {}).get("intent_result")
+        if intent_result is None and settings.ENABLE_CHAT_MODEL_ROUTING:
             intent_result = await classify_chat_intent(last_user_text)
+        if settings.ENABLE_CHAT_MODEL_ROUTING:
             intent = intent_result.intent
             if intent == ChatIntent.CASUAL and settings.ENABLE_LOCAL_CHAT_TIER:
                 # Short chit-chat -> local 1.5B (free, low latency). Use the
@@ -754,11 +786,22 @@ class LangGraphAgent:
                     "vision_context": vision_context or "",
                 }
 
+            # Pre-compute intent classification OUTSIDE the graph to prevent
+            # the local 1.5B model's output from leaking into the SSE stream.
+            # stream_mode="messages" captures ALL LLM calls inside graph nodes,
+            # so classify_chat_intent() must run before graph.astream().
+            precomputed_intent: IntentResult | None = None
+            if settings.ENABLE_CHAT_MODEL_ROUTING and not state.next:
+                last_user_text = _extract_last_user_text(dump_messages(messages))
+                precomputed_intent = await classify_chat_intent(last_user_text)
+
             # Surface tool calls as progress chips: collect them into a queue
             # via a callback and interleave them with the text-token stream.
             tool_event_queue: asyncio.Queue = asyncio.Queue()
             collector = _ToolEventCollector(tool_event_queue)
             config = {**config, "callbacks": [*callbacks, collector]}
+            if precomputed_intent is not None:
+                config["metadata"] = {**config["metadata"], "intent_result": precomputed_intent}
 
             async def _produce_tokens() -> None:
                 try:
@@ -779,6 +822,7 @@ class LangGraphAgent:
 
             token_q: asyncio.Queue = asyncio.Queue()
             producer = asyncio.create_task(_produce_tokens())
+            streamed_text = ""
 
             while True:
                 get_token = asyncio.ensure_future(token_q.get())
@@ -792,6 +836,8 @@ class LangGraphAgent:
                         break
                     if isinstance(item, Exception):
                         raise item
+                    if isinstance(item, str):
+                        streamed_text += item
                     yield item
                 else:
                     yield get_event.result()
@@ -804,6 +850,33 @@ class LangGraphAgent:
 
             # After streaming completes, check for interrupt or update memory
             state = await graph.aget_state(config)
+
+            # The model often paraphrases the chart tool's output and drops the
+            # Markdown image line, so the chart never renders. Re-attach it.
+            if state.values and "messages" in state.values:
+                _msgs = state.values["messages"]
+                chart_md = _latest_chart_markdown(_msgs)
+                logger.info(
+                    "chart_markdown_scan",
+                    found=bool(chart_md),
+                    n_msgs=len(_msgs),
+                    tail_types=[type(getattr(m, "content", None)).__name__ for m in _msgs[-5:]],
+                )
+                if chart_md and chart_md not in streamed_text:
+                    logger.info(
+                        "chart_markdown_injected",
+                        md=chart_md,
+                        streamed_len=len(streamed_text),
+                    )
+                    yield "\n\n" + chart_md
+                else:
+                    logger.info(
+                        "chart_markdown_skipped",
+                        md=chart_md,
+                        already_in_stream=bool(chart_md) and chart_md in streamed_text,
+                        streamed_len=len(streamed_text),
+                    )
+
             if state.next:
                 interrupt_value = state.tasks[0].interrupts[0].value if state.tasks else "Waiting for input."
                 logger.info("graph_interrupted_stream", session_id=session_id, interrupt_value=str(interrupt_value))

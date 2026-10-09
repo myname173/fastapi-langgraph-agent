@@ -5,8 +5,10 @@ from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
 
-class LLMExecution(SQLModel, table=True):
+
+class LLMExecution(UTCDateTimeMixin, SQLModel, table=True):
     """One attempted model invocation within a chat or SDLC execution."""
 
     __tablename__ = "llm_execution"  # pyright: ignore[reportAssignmentType]

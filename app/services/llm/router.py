@@ -5,37 +5,27 @@ The :class:`LLMService` circular fallback is a **fault-tolerance** mechanism
 **capability-matching** layer on top: route each agent role to the most
 cost-effective model that can handle its task.
 
-Hybrid routing table (local vLLM + cloud DashScope):
+Routing table (defaults — override with the MODEL_ROUTING_TABLE env var):
 
-    =============== ================= ======== ============================
-    Agent role      Model              Tier     Rationale
-    =============== ================= ======== ============================
-    supervisor      qwen3.7-plus       medium   Complex state analysis +
-                                              routing decision; 0.5B model
-                                              tested but cannot understand
-                                              multi-field SDLC state
-    po              qwen3.7-max-preview heavy   Product Owner: WHY/ROI/MVP
-                                              reasoning + structured spec
-                                              with Given-When-Then ACs.
-                                              Same tier as planner — both
-                                              need strong reasoning for
-                                              downstream agent consumption.
-    planner         qwen3.7-max-preview heavy   Complex planning
-    coder           qwen3-coder-plus   coding   Coding specialist
-    tester          qwen3.7-plus       medium   Test execution
-    reviewer        qwen3.7-max-2026-  heavy    Quality review
-                    06-08
-    session_naming  local-qwen-0.5b    local    Title generation (short output,
-                                              single-field state) — 0.5B
-                                              model verified sufficient
-    chat            qwen3.7-max-preview heavy   General-purpose (default)
-    =============== ================= ======== ============================
+    =============== ================== ====== ==================================
+    Agent role      Model              Tier   Rationale
+    =============== ================== ====== ==================================
+    supervisor      deepseek-v4-pro    heavy  Multi-field SDLC state analysis +
+                                              routing decision
+    po              deepseek-v4-pro    heavy  WHY/ROI/MVP reasoning + structured
+                                              spec with Given-When-Then ACs
+    planner         deepseek-v4-pro    heavy  Complex planning
+    coder           deepseek-flash     fast   Code generation (1M-token context)
+    tester          deepseek-flash     fast   Test execution
+    reviewer        deepseek-v4-pro    heavy  Quality review
+    session_naming  deepseek-flash     fast   Title generation (short output)
+    chat            deepseek-flash     fast   General-purpose (default)
+    =============== ================== ====== ==================================
 
-Only ``session_naming`` uses the local vLLM (Qwen2.5-0.5B on GTX 1650 Ti)
-because it requires only short structured output from a single user message.
-``supervisor`` was tested with 0.5B but cannot correctly read multi-field
-SDLC state (requirements + plan + code + tests + feedback), so it stays
-on cloud.
+2026-10-06: the chat provider moved from Alibaba Bailian to DeepSeek, so every
+role now targets a DeepSeek model. ``MODEL_ROUTING_TABLE`` (a JSON object) can
+override any entry without a code change — e.g. to put ``local-qwen-0.5b`` back
+on ``session_naming`` when the local vLLM is running.
 
 If the local vLLM is unavailable, ``LLMService``'s circular fallback
 automatically degrades to the next model in ``LLM_MODELS`` (cloud), so
@@ -55,6 +45,8 @@ Models not in the original ``LLM_MODELS`` env var are registered on-demand
 via :meth:`LLMRegistry.ensure_model` so the fallback chain can reach them.
 """
 
+import json
+import os
 from typing import Optional
 
 from app.core.config import settings
@@ -63,19 +55,55 @@ from app.services.llm.registry import LLMRegistry
 
 
 # Agent role → preferred model name.
-# Only session_naming uses local vLLM (local-qwen-0.5b) — verified
-# sufficient for short structured output. Supervisor stays on cloud
-# because 0.5B cannot understand multi-field SDLC state.
-ROUTING_TABLE: dict[str, str] = {
-    "supervisor": "qwen3.7-plus",
-    "po": "qwen3.7-max-preview",
-    "planner": "qwen3.7-max-preview",
-    "coder": "qwen3-coder-plus",
-    "tester": "qwen3.7-plus",
-    "reviewer": "qwen3.7-max-2026-06-08",
-    "session_naming": "local-qwen-0.5b",
-    "chat": "qwen3.7-max-preview",
+#
+# 2026-10-06: the chat provider moved from Alibaba Bailian to DeepSeek
+# (CHAT_BASE_URL=https://api.deepseek.com). Every cloud role must therefore
+# name a model DeepSeek actually serves — a leftover Bailian name such as
+# ``qwen3.8-max`` 404s on api.deepseek.com and burns a failed call before
+# the fallback chain kicks in.
+#
+# Override per-deployment with the MODEL_ROUTING_TABLE env var (JSON object),
+# e.g. MODEL_ROUTING_TABLE={"coder":"deepseek-v4-pro","chat":"deepseek-flash"}.
+# Keep this in sync with CHAT_BASE_URL / LLM_MODELS.
+_DEFAULT_ROUTING_TABLE: dict[str, str] = {
+    "supervisor": "deepseek-v4-pro",
+    "po": "deepseek-v4-pro",
+    "planner": "deepseek-v4-pro",
+    "coder": "deepseek-flash",
+    "tester": "deepseek-flash",
+    "reviewer": "deepseek-v4-pro",
+    "session_naming": "deepseek-flash",
+    "chat": "deepseek-flash",
 }
+
+
+def _load_routing_table() -> dict[str, str]:
+    """Return the effective routing table, merged with the env override.
+
+    ``MODEL_ROUTING_TABLE`` is an optional JSON object mapping agent role →
+    model name. Known roles are overridden, unknown roles are added. A
+    malformed value is logged and ignored (defaults are kept) so a typo
+    cannot take the service down.
+
+    Returns:
+        The effective agent-role → model-name mapping.
+    """
+    table = dict(_DEFAULT_ROUTING_TABLE)
+    raw = os.getenv("MODEL_ROUTING_TABLE", "").strip()
+    if not raw:
+        return table
+    try:
+        override = json.loads(raw)
+        if not isinstance(override, dict):
+            raise TypeError("MODEL_ROUTING_TABLE must be a JSON object")
+        table.update({str(k): str(v) for k, v in override.items()})
+        logger.info("model_routing_table_overridden", roles=sorted(override.keys()))
+    except (ValueError, TypeError) as exc:
+        logger.warning("model_routing_table_override_ignored", error=str(exc), raw=raw[:200])
+    return table
+
+
+ROUTING_TABLE: dict[str, str] = _load_routing_table()
 
 
 class ModelRouter:

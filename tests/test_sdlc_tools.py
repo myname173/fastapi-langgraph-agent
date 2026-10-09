@@ -234,15 +234,19 @@ class TestSecurityValidation:
         result = sanitize_command("pytest -v")
         assert result == ["pytest", "-v"]
 
-    def test_sanitize_command_rejects_dangerous_chars(self):
-        """Test that dangerous characters are rejected."""
+    def test_sanitize_command_rejects_command_substitution(self):
+        """Test that $(...) command substitution is rejected."""
         with pytest.raises(ValueError, match="dangerous characters"):
-            sanitize_command("python script.py; rm -rf /")
+            sanitize_command("python script.py $(rm -rf /)")
 
-    def test_sanitize_command_rejects_pipe(self):
-        """Test that pipe character is rejected."""
+    def test_sanitize_command_rejects_output_redirect(self):
+        """Test that > output redirection is rejected."""
         with pytest.raises(ValueError, match="dangerous characters"):
-            sanitize_command("python script.py | cat")
+            sanitize_command("python script.py > /tmp/out")
+
+    def test_sanitize_command_pipe_is_inert(self):
+        """A pipe is a literal argv element — exec is shell-free, so it is inert."""
+        assert sanitize_command("python script.py | cat") == ["python", "script.py", "|", "cat"]
 
     def test_sanitize_command_rejects_unknown_command(self):
         """Test that unknown commands are rejected."""

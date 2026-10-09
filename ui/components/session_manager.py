@@ -36,12 +36,13 @@ STATUS_BADGES: Dict[str, str] = {
     "cancelled": "\u274c",  # ❌
     "paused": "\u23f8\ufe0f",  # ⏸️ (pending approval)
     "error": "\u26a0\ufe0f",  # ⚠️
+    "failed": "\u26a0\ufe0f",  # ⚠️ (supervisor circuit breaker / terminal failure)
 }
 
 # Filter categories — maps button label to status set.
 FILTER_ACTIVE = {"planning", "coding", "testing", "reviewing", "paused"}
 FILTER_DONE = {"completed"}
-FILTER_ERROR = {"cancelled", "error"}
+FILTER_ERROR = {"cancelled", "error", "failed"}
 
 # Maximum requirements preview length.
 PREVIEW_LEN = 60

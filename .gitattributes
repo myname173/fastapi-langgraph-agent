@@ -3,3 +3,12 @@
 *.env text eol=lf
 .env.* text eol=lf
 Makefile text eol=lf
+
+# Windows batch files MUST stay CRLF: cmd.exe mis-parses LF-only .bat files.
+# With LF endings it desyncs on parenthesised if/else blocks and silently
+# drops leading characters, so "setlocal" executes as "tlocal", "echo" as
+# "ho", and an `if "%~1"=="" (...) else (...)` line collapses into a bare
+# argument. Symptom: a wall of "'tlocal' is not recognized as an internal or
+# external command" and the script appearing to do nothing.
+*.bat text eol=crlf
+*.cmd text eol=crlf

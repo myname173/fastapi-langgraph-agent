@@ -56,6 +56,7 @@ async def research_debate(topic: str) -> str:
                     max_tokens=400,
                     temperature=0.1,
                     cacheable=False,
+                    bind_tools=False,
                 ),
                 timeout=30,
             )

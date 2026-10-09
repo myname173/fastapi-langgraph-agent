@@ -15,11 +15,11 @@ from datetime import timedelta
 from jose import jwt
 
 
-def _make_token(thread_id: str) -> str:
+def _make_token(thread_id: str, token_type: str = "session") -> str:
     """Build a valid JWT using the test secret (deferred import)."""
     from app.utils.auth import create_access_token
 
-    return create_access_token(thread_id).access_token
+    return create_access_token(thread_id, token_type=token_type).access_token
 
 
 def _make_expired_token(thread_id: str) -> str:
@@ -129,37 +129,71 @@ class TestMissingAuth:
 
 
 class TestSessionIsolation:
-    """Tests verifying session-based access isolation."""
+    """Isolation of the session-management endpoints (rename / delete).
 
-    async def test_session_a_cannot_delete_session_b(self, async_client, mock_db, make_fake_session):
-        """A token for session A cannot delete session B."""
-        sess_a = "session-a"
-        sess_b = "session-b"
-        fake_session = make_fake_session(session_id=sess_a, user_id=1)
-        mock_db.get_session.return_value = fake_session
+    These endpoints require a **user** token (``get_current_user``) and then
+    verify that the target session belongs to that user. So there are two
+    isolation guarantees to test: a session-scoped token cannot manage sessions
+    at all (401), and a user token cannot touch another user's session (403).
+    """
 
-        token = _make_token(sess_a)
+    async def test_session_token_cannot_delete_sessions(self, async_client, mock_db, make_fake_session):
+        """A session token is rejected by DELETE /auth/session/{id} (401)."""
+        mock_db.get_session.return_value = make_fake_session(session_id="session-a", user_id=1)
+
+        token = _make_token("session-a")  # session-type token
         headers = {"Authorization": f"Bearer {token}"}
 
-        response = await async_client.delete(f"/api/v1/auth/session/{sess_b}", headers=headers)
+        response = await async_client.delete("/api/v1/auth/session/session-b", headers=headers)
 
-        assert response.status_code == 403
-        assert "Cannot delete other sessions" in response.json()["detail"]
-        # delete_session must not be called on mismatched session
+        assert response.status_code == 401
         mock_db.delete_session.assert_not_awaited()
 
-    async def test_session_a_cannot_rename_session_b(self, async_client, mock_db, make_fake_session):
-        """A token for session A cannot rename session B."""
-        sess_a = "session-a"
-        sess_b = "session-b"
-        fake_session = make_fake_session(session_id=sess_a, user_id=1)
-        mock_db.get_session.return_value = fake_session
+    async def test_session_token_cannot_rename_sessions(self, async_client, mock_db, make_fake_session):
+        """A session token is rejected by PATCH /auth/session/{id}/name (401)."""
+        mock_db.get_session.return_value = make_fake_session(session_id="session-a", user_id=1)
 
-        token = _make_token(sess_a)
+        token = _make_token("session-a")  # session-type token
         headers = {"Authorization": f"Bearer {token}"}
 
         response = await async_client.patch(
-            f"/api/v1/auth/session/{sess_b}/name",
+            "/api/v1/auth/session/session-b/name",
+            headers=headers,
+            data={"name": "hijacked"},
+        )
+
+        assert response.status_code == 401
+        mock_db.update_session_name.assert_not_awaited()
+
+    async def test_user_cannot_delete_another_users_session(
+        self, async_client, mock_db, make_fake_user, make_fake_session
+    ):
+        """A user token cannot delete a session owned by a different user (403)."""
+        mock_db.get_user.return_value = make_fake_user(user_id=1)
+        mock_db.get_session.return_value = make_fake_session(session_id="session-b", user_id=2)
+
+        token = _make_token("1", token_type="user")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await async_client.delete("/api/v1/auth/session/session-b", headers=headers)
+
+        assert response.status_code == 403
+        assert "Cannot delete other sessions" in response.json()["detail"]
+        # delete_session must not be called on a mismatched session
+        mock_db.delete_session.assert_not_awaited()
+
+    async def test_user_cannot_rename_another_users_session(
+        self, async_client, mock_db, make_fake_user, make_fake_session
+    ):
+        """A user token cannot rename a session owned by a different user (403)."""
+        mock_db.get_user.return_value = make_fake_user(user_id=1)
+        mock_db.get_session.return_value = make_fake_session(session_id="session-b", user_id=2)
+
+        token = _make_token("1", token_type="user")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await async_client.patch(
+            "/api/v1/auth/session/session-b/name",
             headers=headers,
             data={"name": "hijacked"},
         )

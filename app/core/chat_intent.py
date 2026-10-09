@@ -170,6 +170,7 @@ async def classify_chat_intent(user_message: str) -> IntentResult:
                 max_tokens=20,
                 temperature=0.0,
                 cacheable=False,
+                bind_tools=False,
             )
         raw = extract_text_content(response.content).strip() if response.content else ""
         result = _parse_intent_output(raw)

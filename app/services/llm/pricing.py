@@ -23,14 +23,26 @@ from typing import Dict
 # Aligned with the models in ``router.ROUTING_TABLE``.
 MODEL_PRICING_USD_PER_1M: Dict[str, Dict[str, float]] = {
     # --- qwen3.7-plus family (medium tier) ---
-    "qwen3.7-plus": {"input": 0.4, "output": 1.2},
+    "qwen3.7-plus-2026-05-26": {"input": 0.4, "output": 1.2},
     # --- qwen3.7-max family (heavy tier) ---
     "qwen3.7-max-preview": {"input": 2.4, "output": 9.6},
     "qwen3.7-max-2026-06-08": {"input": 2.4, "output": 9.6},
     # --- coding specialist ---
-    "qwen3-coder-plus": {"input": 0.4, "output": 1.2},
+    "kimi-k2.7-code": {"input": 0.4, "output": 1.2},
     # --- local vLLM (zero API cost) ---
     "local-qwen-0.5b": {"input": 0.0, "output": 0.0},
+    # --- sdlc unified flash model (2026-08-11) ---
+    "qwen3.7-flash-2026-07-15": {"input": 0.0007, "output": 0.0021},
+    # --- deepseek v4 flash (2026-08-11, qwen3.7-flash quota exhausted) ---
+    "deepseek-v4-flash-0731": {"input": 0.07, "output": 0.27},
+    # --- DeepSeek, current chat/LLM provider (dual-provider switch) ---
+    # Peak rates are stored (off-peak bills at half) so cost estimates never
+    # understate the bill. Keep in sync with ``router.ROUTING_TABLE`` and
+    # ``CHAT_BASE_URL``/``LLM_MODELS`` in .env.production.
+    #   deepseek-flash   → DeepSeek-V4.1-Flash (1M ctx, tool calling + vision)
+    #   deepseek-v4-pro  → DeepSeek-V4-Pro-0813 (1M ctx, no vision)
+    "deepseek-flash": {"input": 0.30, "output": 1.20},
+    "deepseek-v4-pro": {"input": 1.32, "output": 3.96},
 }
 
 # Conservative fallback so unknown models are never under-reported.

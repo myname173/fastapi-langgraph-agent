@@ -6,6 +6,8 @@ from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
+
 
 class GoalStatus(str, Enum):
     """Goal status enumeration."""
@@ -15,7 +17,7 @@ class GoalStatus(str, Enum):
     ARCHIVED = "archived"
 
 
-class Goal(SQLModel, table=True):
+class Goal(UTCDateTimeMixin, SQLModel, table=True):
     """A long-term objective that groups multiple SDLC tasks.
 
     Attributes:

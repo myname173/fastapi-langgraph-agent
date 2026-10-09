@@ -12,6 +12,8 @@ from enum import Enum
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
+
 
 class RiskTolerance(str, Enum):
     """User risk tolerance for portfolio-level guidance."""
@@ -21,7 +23,7 @@ class RiskTolerance(str, Enum):
     AGGRESSIVE = "aggressive"
 
 
-class Portfolio(SQLModel, table=True):
+class Portfolio(UTCDateTimeMixin, SQLModel, table=True):
     """A user's investment portfolio."""
 
     __tablename__ = "portfolio"  # pyright: ignore[reportAssignmentType]
@@ -35,7 +37,7 @@ class Portfolio(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class Holding(SQLModel, table=True):
+class Holding(UTCDateTimeMixin, SQLModel, table=True):
     """A single position inside a portfolio."""
 
     __tablename__ = "holding"  # pyright: ignore[reportAssignmentType]

@@ -40,6 +40,8 @@ Lifecycle contract
 3. ``await close_pool()`` — call once at app shutdown (idempotent).
 """
 
+import asyncio
+import sys
 from typing import Optional
 
 from psycopg import (
@@ -94,6 +96,13 @@ async def init_pool() -> Optional[PostgresConnPool]:
     global _pool
     if _pool is not None:
         return _pool
+
+    # Windows 上 psycopg 异步模式不兼容 ProactorEventLoop，需改用 SelectorEventLoop
+    if sys.platform == "win32":
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except Exception:  # noqa: BLE001
+            logger.warning("set_selector_event_loop_policy_failed")
 
     max_size = settings.POSTGRES_POOL_SIZE
     try:

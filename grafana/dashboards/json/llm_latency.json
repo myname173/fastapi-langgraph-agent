@@ -2,7 +2,10 @@
   "id": null,
   "uid": "llm-latency",
   "title": "LLM Inference Latency",
-  "tags": ["inference", "latency"],
+  "tags": [
+    "inference",
+    "latency"
+  ],
   "timezone": "browser",
   "schemaVersion": 30,
   "version": 3,
@@ -19,7 +22,12 @@
         }
       ],
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 }
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 9
+      }
     },
     {
       "type": "graph",
@@ -32,7 +40,12 @@
         }
       ],
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 }
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 9
+      }
     },
     {
       "type": "graph",
@@ -45,7 +58,12 @@
         }
       ],
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 9 }
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 9
+      }
     },
     {
       "type": "graph",
@@ -58,8 +76,16 @@
         }
       ],
       "datasource": "Prometheus",
-      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 9 }
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 9
+      }
     }
   ],
-  "time": { "from": "now-1h", "to": "now" }
+  "time": {
+    "from": "now-1M",
+    "to": "now"
+  }
 }

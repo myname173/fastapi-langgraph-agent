@@ -193,17 +193,21 @@ class TestSessionCreateEndpoint:
 
 
 class TestSessionNameUpdateEndpoint:
-    """Tests for PATCH /api/v1/auth/session/{session_id}/name."""
+    """Tests for PATCH /api/v1/auth/session/{session_id}/name.
 
-    async def test_update_name_success(self, async_client, mock_db, make_fake_session):
-        """Updating the matching session's name succeeds."""
+    These endpoints authenticate with a **user** token (not a session token) and
+    verify that the target session belongs to that user, so the chat-history
+    sidebar can rename any of the user's sessions — not just the active one.
+    """
+
+    async def test_update_name_success(self, async_client, mock_db, make_fake_user, make_fake_session):
+        """Renaming one of the caller's own sessions succeeds."""
         sess_id = "sess-to-update"
-        fake_session = make_fake_session(session_id=sess_id, user_id=1, name="Old Name")
-        updated_session = make_fake_session(session_id=sess_id, user_id=1, name="New Name")
-        mock_db.get_session.return_value = fake_session
-        mock_db.update_session_name.return_value = updated_session
+        mock_db.get_user.return_value = make_fake_user(user_id=1)
+        mock_db.get_session.return_value = make_fake_session(session_id=sess_id, user_id=1, name="Old Name")
+        mock_db.update_session_name.return_value = make_fake_session(session_id=sess_id, user_id=1, name="New Name")
 
-        token = _make_token(sess_id)
+        token = _make_token("1", token_type="user")
         headers = {"Authorization": f"Bearer {token}"}
 
         response = await async_client.patch(
@@ -215,14 +219,16 @@ class TestSessionNameUpdateEndpoint:
         assert response.status_code == 200
         assert response.json()["name"] == "New Name"
 
-    async def test_update_name_mismatched_session_returns_403(self, async_client, mock_db, make_fake_session):
-        """Updating a different session's name returns 403."""
-        token_session = "my-session"
-        target_session = "other-session"
-        fake_session = make_fake_session(session_id=token_session, user_id=1)
-        mock_db.get_session.return_value = fake_session
+    async def test_update_name_other_users_session_returns_403(
+        self, async_client, mock_db, make_fake_user, make_fake_session
+    ):
+        """Renaming a session owned by another user returns 403."""
+        target_session = "other-users-session"
+        mock_db.get_user.return_value = make_fake_user(user_id=1)
+        # The target session belongs to a different user (id=2).
+        mock_db.get_session.return_value = make_fake_session(session_id=target_session, user_id=2)
 
-        token = _make_token(token_session)
+        token = _make_token("1", token_type="user")
         headers = {"Authorization": f"Bearer {token}"}
 
         response = await async_client.patch(
@@ -232,38 +238,44 @@ class TestSessionNameUpdateEndpoint:
         )
 
         assert response.status_code == 403
+        mock_db.update_session_name.assert_not_awaited()
 
 
 class TestSessionDeleteEndpoint:
-    """Tests for DELETE /api/v1/auth/session/{session_id}."""
+    """Tests for DELETE /api/v1/auth/session/{session_id}.
 
-    async def test_delete_session_success(self, async_client, mock_db, make_fake_session):
-        """Deleting the matching session succeeds."""
+    Authenticates with a user token and verifies ownership of the target session.
+    """
+
+    async def test_delete_session_success(self, async_client, mock_db, make_fake_user, make_fake_session):
+        """Deleting one of the caller's own sessions succeeds."""
         sess_id = "sess-to-delete"
-        fake_session = make_fake_session(session_id=sess_id, user_id=1)
-        mock_db.get_session.return_value = fake_session
+        mock_db.get_user.return_value = make_fake_user(user_id=1)
+        mock_db.get_session.return_value = make_fake_session(session_id=sess_id, user_id=1)
         mock_db.delete_session.return_value = True
 
-        token = _make_token(sess_id)
+        token = _make_token("1", token_type="user")
         headers = {"Authorization": f"Bearer {token}"}
 
         response = await async_client.delete(f"/api/v1/auth/session/{sess_id}", headers=headers)
 
         assert response.status_code == 200
 
-    async def test_delete_session_mismatched_returns_403(self, async_client, mock_db, make_fake_session):
-        """Deleting another session returns 403."""
-        token_session = "my-session"
-        target_session = "other-session"
-        fake_session = make_fake_session(session_id=token_session, user_id=1)
-        mock_db.get_session.return_value = fake_session
+    async def test_delete_other_users_session_returns_403(
+        self, async_client, mock_db, make_fake_user, make_fake_session
+    ):
+        """Deleting a session owned by another user returns 403."""
+        target_session = "other-users-session"
+        mock_db.get_user.return_value = make_fake_user(user_id=1)
+        mock_db.get_session.return_value = make_fake_session(session_id=target_session, user_id=2)
 
-        token = _make_token(token_session)
+        token = _make_token("1", token_type="user")
         headers = {"Authorization": f"Bearer {token}"}
 
         response = await async_client.delete(f"/api/v1/auth/session/{target_session}", headers=headers)
 
         assert response.status_code == 403
+        mock_db.delete_session.assert_not_awaited()
 
 
 class TestGetUserSessionsEndpoint:

@@ -52,10 +52,11 @@ Model prices are a module-level constant in [`app/services/llm/pricing.py`](../a
 
 ```python
 MODEL_PRICING_USD_PER_1M: Dict[str, Dict[str, float]] = {
-    "qwen3.7-plus":            {"input": 0.4, "output": 1.2},
-    "qwen3.7-max-preview":     {"input": 2.4, "output": 9.6},
-    "qwen3.7-max-2026-06-08":  {"input": 2.4, "output": 9.6},
-    "qwen3-coder-plus":        {"input": 0.4, "output": 1.2},
+    "qwen3.7-plus-2026-05-26":  {"input": 0.4, "output": 1.2},
+    "qwen3.7-max-preview":      {"input": 2.4, "output": 9.6},
+    "qwen3.7-max-2026-06-08":   {"input": 2.4, "output": 9.6},
+    "kimi-k2.7-code":           {"input": 0.4, "output": 1.2},
+    "local-qwen-0.5b":          {"input": 0.0, "output": 0.0},
 }
 
 # Conservative fallback so unknown models are never under-reported.

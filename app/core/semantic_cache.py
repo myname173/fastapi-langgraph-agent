@@ -8,8 +8,8 @@ Architecture
 ------------
 
 1. **Embedding generation** — uses the configured embedding model
-   (default: Bailian/DashScope ``text-embedding-v3``, 1024 dims) via the
-   OpenAI-compatible API. Dimension is controlled by
+   (default: Bailian/DashScope ``qwen3.7-text-embedding-flash``, 1024 dims)
+   via the OpenAI-compatible API. Dimension is controlled by
    ``settings.LONG_TERM_MEMORY_EMBEDDING_DIM``.
 2. **Storage** — a ``semantic_cache`` PostgreSQL table with a ``vector(N)``
    column (N = ``settings.LONG_TERM_MEMORY_EMBEDDING_DIM``), backed by the
@@ -107,8 +107,10 @@ class SemanticCache:
         """Lazily create the async OpenAI client for embeddings."""
         if self._embedding_client is None:
             self._embedding_client = AsyncOpenAI(
-                api_key=settings.OPENAI_API_KEY,
-                base_url=settings.OPENAI_BASE_URL,
+                # Embeddings may live on a different vendor than chat —
+                # DeepSeek, for example, has no /embeddings endpoint.
+                api_key=settings.EMBEDDING_API_KEY,
+                base_url=settings.EMBEDDING_BASE_URL,
                 timeout=10,
             )
         return self._embedding_client
@@ -125,7 +127,7 @@ class SemanticCache:
                 input=text[:8000],  # truncate to avoid token limits
                 # Must match the vector(N) column in semantic_cache table.
                 # Without this, the API returns the model's default dimension
-                # (1536 for OpenAI, 1024 for text-embedding-v3), which may
+                # (1536 for OpenAI, 1024 for qwen3.7-text-embedding*), which may
                 # not match the table schema.
                 dimensions=settings.LONG_TERM_MEMORY_EMBEDDING_DIM,
             )

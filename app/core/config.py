@@ -187,10 +187,27 @@ class Settings:
         self.OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
         # OpenAI-compatible base URL. Set this to use non-OpenAI providers
         # (e.g. Alibaba DashScope/Bailian, SiliconFlow, Azure OpenAI).
-        #   Alibaba Bailian:  https://dashscope.aliyuncs.com/compatible-mode/v1
+        #   Alibaba Bailian (shared): https://dashscope.aliyuncs.com/compatible-mode/v1
+        #   Alibaba Bailian (MaaS):   https://ws-<id>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
         #   SiliconFlow:      https://api.siliconflow.cn/v1
         #   OpenAI (default): https://api.openai.com/v1
         self.OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
+        # ── Provider split: chat vs embeddings ───────────────────────
+        # Chat and embeddings may live on different vendors. DeepSeek, for
+        # example, has no /embeddings endpoint at all — a DeepSeek-only key
+        # cannot serve the memory / knowledge-base / code-index / semantic-
+        # cache vectors. Set CHAT_* and EMBEDDING_* independently.
+        # Both fall back to the shared OPENAI_* values, so a single-provider
+        # setup behaves exactly as before.
+        #   CHAT_*      → LLMRegistry default + mem0 fact-extraction LLM
+        #   EMBEDDING_* → every /embeddings call (mem0 embedder + semantic
+        #                 cache) and the DashScope-native media service
+        self.CHAT_API_KEY = get_secret("CHAT_API_KEY", "") or self.OPENAI_API_KEY
+        self.CHAT_BASE_URL = os.getenv("CHAT_BASE_URL", "") or self.OPENAI_BASE_URL
+        self.EMBEDDING_API_KEY = get_secret("EMBEDDING_API_KEY", "") or self.OPENAI_API_KEY
+        self.EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "") or self.OPENAI_BASE_URL
+
         self.DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "")
         # Empty default forces explicit configuration in production/staging —
         # validate_security() Tier 3 rejects an empty value there. Test/dev
@@ -221,7 +238,7 @@ class Settings:
             m.strip()
             for m in os.getenv(
                 "CODER_ELIGIBLE_MODELS",
-                "qwen3-coder-plus,qwen3.7-max,qwen3.7-max-preview,qwen3.7-plus-2026-05-26,glm-5.2",
+                "deepseek-flash,deepseek-v4-pro",
             ).split(",")
             if m.strip()
         ]
@@ -269,6 +286,13 @@ class Settings:
         except (json.JSONDecodeError, TypeError):
             self.LLM_MODEL_IDENTITIES = {}
         self.ENABLE_LLM_EXECUTION_AUDIT = os.getenv("ENABLE_LLM_EXECUTION_AUDIT", "true").lower() == "true"
+        # Stale-task reaper: an SDLC run that is interrupted (process restart,
+        # crash, aborted stream) leaves its row in a non-terminal status
+        # forever, so the 「进行中」 filter fills up with tasks that are not
+        # actually running. On startup, any non-terminal task whose
+        # ``updated_at`` is older than this many minutes is marked FAILED.
+        # Set to 0 to disable reaping.
+        self.SDLC_STALE_TASK_TIMEOUT_MINUTES = int(os.getenv("SDLC_STALE_TASK_TIMEOUT_MINUTES", "60"))
         # Enable reasoning/effort mode for analytical turns (cloud heavy only).
         self.CHAT_ENABLED_REASONING = os.getenv("CHAT_ENABLED_REASONING", "false").lower() == "true"
         self.CHAT_CASUAL_TEMPERATURE = float(os.getenv("CHAT_CASUAL_TEMPERATURE", "0.3"))
@@ -322,6 +346,13 @@ class Settings:
 
         self.DEFAULT_LLM_TEMPERATURE = float(os.getenv("DEFAULT_LLM_TEMPERATURE", "0.2"))
         self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
+        # Token budget for chat conversation history trimming. Separate from
+        # MAX_TOKENS (which controls LLM response length) because the two have
+        # very different optimal values: 2000 tokens is fine for a single
+        # response, but far too small for conversation context — a single long
+        # analyst reply would fill the entire budget, dropping all prior turns.
+        # Default 16000 matches SDLC_MAX_TOKENS and fits within Qwen's 32K ctx.
+        self.CHAT_CONTEXT_MAX_TOKENS = int(os.getenv("CHAT_CONTEXT_MAX_TOKENS", "16000"))
         # Token budget for SDLC orchestrator messages. Larger than MAX_TOKENS
         # because SDLC is multi-round (supervisor→coder→tester→reviewer)
         # and each round appends to the shared message history.
@@ -365,11 +396,33 @@ class Settings:
         self.MCP_DEFAULT_TRANSPORT = os.getenv("MCP_DEFAULT_TRANSPORT", "streamable_http").lower()
         self.MAX_LLM_CALL_RETRIES = int(os.getenv("MAX_LLM_CALL_RETRIES", "3"))
         self.LLM_TOTAL_TIMEOUT = int(os.getenv("LLM_TOTAL_TIMEOUT", "60"))
+        # Per-request client timeout (seconds) for the underlying HTTP call made
+        # by ChatOpenAI. This bounds a *single* LLM invocation (including
+        # with_structured_output / tool-calling requests) so a provider that
+        # silently hangs — e.g. deepseek via DashScope compatible-mode — cannot
+        # pin the whole graph indefinitely. The SDK surfaces this as an
+        # APITimeoutError which our tenacity retry + service-level total-timeout
+        # budget then handle. Must be <= CHAT_NONSTREAM_TIMEOUT_SEC and <
+        # SDLC_WORKFLOW_TIMEOUT_SEC so outer guards still apply.
+        self.LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
         # Outer request-budget timeout for non-streaming /chat. Bounds the
         # full graph.ainvoke (which may loop chat->tool->chat, making multiple
         # LLM calls). Must be > LLM_TOTAL_TIMEOUT so the inner per-call timeout
         # governs single calls while this bounds the aggregate.
         self.CHAT_NONSTREAM_TIMEOUT_SEC = int(os.getenv("CHAT_NONSTREAM_TIMEOUT_SEC", "120"))
+        # SDLC workflow hard timeout (seconds). Bounds a single get_response graph
+        # run so a misbehaving model (e.g. hanging structured-output calls)
+        # cannot pin an eval task indefinitely. Set via SDLC_WORKFLOW_TIMEOUT_SEC.
+        self.SDLC_WORKFLOW_TIMEOUT_SEC = int(os.getenv("SDLC_WORKFLOW_TIMEOUT_SEC", "1800"))
+
+        # SSE keepalive interval for /chatbot/chat/stream. Cloudflare Quick
+        # Tunnel returns HTTP 524 when the origin sends no body bytes for ~100s.
+        # The pre-stream prep (memory search + intent classification) and slow
+        # LLM/tool gaps can exceed that, so the stream emits a `: keepalive`
+        # SSE comment frame every SSE_KEEPALIVE_SEC seconds of idle. Browser
+        # SSE parsers ignore comment frames (only `data:` lines are processed),
+        # so this is invisible to the UI.
+        self.SSE_KEEPALIVE_SEC = int(os.getenv("SSE_KEEPALIVE_SEC", "15"))
 
         # Prompt version management — maps agent_name to active version.
         # Example env value: coder:v2,planner:v1
@@ -437,13 +490,15 @@ class Settings:
         self.ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "true").lower() == "true"
 
         # Long term memory Configuration
-        self.LONG_TERM_MEMORY_MODEL = os.getenv("LONG_TERM_MEMORY_MODEL", "gpt-5-nano")
-        self.LONG_TERM_MEMORY_EMBEDDER_MODEL = os.getenv("LONG_TERM_MEMORY_EMBEDDER_MODEL", "text-embedding-3-small")
+        self.LONG_TERM_MEMORY_MODEL = os.getenv("LONG_TERM_MEMORY_MODEL", "deepseek-flash")
+        self.LONG_TERM_MEMORY_EMBEDDER_MODEL = os.getenv("LONG_TERM_MEMORY_EMBEDDER_MODEL", "qwen3.7-text-embedding")
         self.LONG_TERM_MEMORY_COLLECTION_NAME = os.getenv("LONG_TERM_MEMORY_COLLECTION_NAME", "longterm_memory")
         # Embedding dimension must match the embedder model's output dim.
-        # Bailian text-embedding-v3 supports {64,128,256,512,768,1024};
-        # default 1024 matches .env.production. OpenAI text-embedding-3-small
-        # would use 1536 — adjust this if you switch providers.
+        # Bailian qwen3.7-text-embedding supports {256,512,768,1024,1536,2048,2560};
+        # default 1024 matches .env.production and the existing vector(1024)
+        # pgvector columns (so no table migration is needed). OpenAI
+        # text-embedding-3-small would use 1536 — adjust this if you switch
+        # providers. A mismatch fails loudly via EmbeddingModelMismatchError.
         self.LONG_TERM_MEMORY_EMBEDDING_DIM = int(os.getenv("LONG_TERM_MEMORY_EMBEDDING_DIM", "1024"))
 
         # Code Index Configuration
@@ -542,9 +597,27 @@ class Settings:
         # we only need a concise describe-only summary for chat context.
         self.VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "1024"))
 
+        # Media generation (text-to-image / text-to-video via Bailian wan2.x).
+        # Opt-in via ENABLE_MEDIA_GENERATION Feature Flag (default false).
+        # When disabled:
+        #   - the /media endpoints are not registered at all (api.py)
+        #   - the coder agent loses generate_image / generate_video (registry)
+        # so deployments that never need visual assets don't have to
+        # provision wan2.6-t2i / wan2.7-t2v on their Bailian account.
+        self.ENABLE_MEDIA_GENERATION = os.getenv("ENABLE_MEDIA_GENERATION", "false").lower() == "true"
+
+        # DashScope *native* (non-OpenAI-compatible) base URL, used only by the
+        # media service (image/video via wan2.x). Default is the shared public
+        # gateway; accounts provisioned with a dedicated Bailian workspace
+        # (MaaS) endpoint should point this at their own host, e.g.
+        #   https://ws-xxxxxxxx.cn-beijing.maas.aliyuncs.com/api/v1
+        # Keep this in sync with EMBEDDING_BASE_URL's host (same account).
+        self.MEDIA_DASHSCOPE_BASE_URL = os.getenv("MEDIA_DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+
         # Image generation (DashScope native API, NOT OpenAI-compatible).
         # Models: wan2.6-t2i (text-to-image), wan2.6-imageedit (image edit).
         # Free quota: ~500 images, valid 90 days from Bailian activation.
+        # Only read when ENABLE_MEDIA_GENERATION is true.
         self.IMAGE_GENERATION_MODEL = os.getenv("IMAGE_GENERATION_MODEL", "wan2.6-t2i")
         self.IMAGE_GENERATION_SIZE = os.getenv("IMAGE_GENERATION_SIZE", "1024*1024")
         self.IMAGE_GENERATION_COUNT = int(os.getenv("IMAGE_GENERATION_COUNT", "1"))
@@ -552,6 +625,7 @@ class Settings:
         # Video generation (DashScope native API, async).
         # Models: wan2.7-t2v (latest T2V), wan2.6-t2v, wan2.6-i2v (image-to-video).
         # Free quota: 50 seconds, valid 90 days.
+        # Only read when ENABLE_MEDIA_GENERATION is true.
         self.VIDEO_GENERATION_MODEL = os.getenv("VIDEO_GENERATION_MODEL", "wan2.7-t2v")
         self.VIDEO_GENERATION_RESOLUTION = os.getenv("VIDEO_GENERATION_RESOLUTION", "720P")
         self.VIDEO_GENERATION_DURATION = int(os.getenv("VIDEO_GENERATION_DURATION", "5"))
@@ -643,7 +717,9 @@ class Settings:
 
         # Semantic Cache Configuration (pgvector-based, embedding similarity)
         self.SEMANTIC_CACHE_ENABLED = os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() == "true"
-        self.SEMANTIC_CACHE_EMBEDDING_MODEL = os.getenv("SEMANTIC_CACHE_EMBEDDING_MODEL", "text-embedding-v3")
+        self.SEMANTIC_CACHE_EMBEDDING_MODEL = os.getenv(
+            "SEMANTIC_CACHE_EMBEDDING_MODEL", "qwen3.7-text-embedding-flash"
+        )
         self.SEMANTIC_CACHE_MEMORY_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_MEMORY_THRESHOLD", "0.90"))
         self.SEMANTIC_CACHE_LLM_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_LLM_THRESHOLD", "0.95"))
         self.SEMANTIC_CACHE_TTL_SECONDS = int(os.getenv("SEMANTIC_CACHE_TTL_SECONDS", "3600"))
@@ -674,7 +750,9 @@ class Settings:
         # Evaluation Configuration
         self.EVALUATION_LLM = os.getenv("EVALUATION_LLM", "gpt-5")
         self.EVALUATION_BASE_URL = os.getenv("EVALUATION_BASE_URL", "https://api.openai.com/v1")
-        self.EVALUATION_API_KEY = os.getenv("EVALUATION_API_KEY", self.OPENAI_API_KEY)
+        # 支持 Docker secrets：`EVALUATION_API_KEY_FILE` 指向文件内容优先，
+        # 否则回退到 `EVALUATION_API_KEY` 环境变量，再回退到主 LLM 密钥。
+        self.EVALUATION_API_KEY = get_secret("EVALUATION_API_KEY", self.OPENAI_API_KEY)
         self.EVALUATION_SLEEP_TIME = int(os.getenv("EVALUATION_SLEEP_TIME", "10"))
 
         # Apply environment-specific settings
@@ -823,9 +901,16 @@ class Settings:
             if self.DEBUG:
                 violations.append(f"DEBUG must be False in {self.ENVIRONMENT.value} environment")
 
-            if not self.OPENAI_API_KEY:
+            if not self.CHAT_API_KEY:
                 violations.append(
-                    f"OPENAI_API_KEY must be set in {self.ENVIRONMENT.value} (LLM service unavailable without it)"
+                    f"CHAT_API_KEY (or OPENAI_API_KEY) must be set in {self.ENVIRONMENT.value} "
+                    f"(LLM service unavailable without it)"
+                )
+
+            if not self.EMBEDDING_API_KEY:
+                violations.append(
+                    f"EMBEDDING_API_KEY (or OPENAI_API_KEY) must be set in {self.ENVIRONMENT.value} "
+                    f"(memory / knowledge-base / code-index / semantic-cache all need /embeddings)"
                 )
 
             # DEFAULT_LLM_MODEL: empty default removed; production/staging

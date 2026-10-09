@@ -19,6 +19,7 @@
       portfolio: false,
       risk: false,
       alert: false,
+      knowledge: false,
     },
   };
 
@@ -33,23 +34,33 @@
     Sidebar.el.innerHTML = Sidebar._template();
     parentEl.appendChild(Sidebar.el);
 
-    // toggle button — find it in the DOM (it's in the navbar, not inside sidebar)
+    // Toggle button — declared in index.html's topbar (#btn-sidebar). Fall
+    // back to dynamic insertion next to the mode switcher if absent.
     Sidebar.toggleBtn = document.getElementById("btn-sidebar");
     if (!Sidebar.toggleBtn) {
-      // Dynamically insert toggle button into navbar if not present
-      var nav = document.querySelector(".navbar");
-      if (nav) {
+      var anchor = document.querySelector(".switcher") || document.querySelector(".topbar");
+      if (anchor && anchor.parentNode) {
         var btn = document.createElement("button");
         btn.id = "btn-sidebar";
+        btn.type = "button";
         btn.className = "btn-sidebar";
-        btn.setAttribute("aria-label", "打开工具面板");
+        btn.setAttribute("aria-label", "投资者工具面板");
         btn.setAttribute("title", "投资者工具面板");
+        btn.setAttribute("aria-expanded", "false");
         btn.textContent = "📊";
-        btn.addEventListener("click", Sidebar.toggle);
-        nav.appendChild(btn);
+        if (anchor.classList.contains("switcher")) {
+          anchor.parentNode.insertBefore(btn, anchor);
+        } else {
+          anchor.appendChild(btn);
+        }
         Sidebar.toggleBtn = btn;
       }
-    } else {
+    }
+    // Re-bind defensively: mount() runs again on every mode switch and the
+    // topbar button is a singleton, so remove-then-add prevents stacking
+    // listeners (which would make one click open and immediately close).
+    if (Sidebar.toggleBtn) {
+      Sidebar.toggleBtn.removeEventListener("click", Sidebar.toggle);
       Sidebar.toggleBtn.addEventListener("click", Sidebar.toggle);
     }
 
@@ -79,7 +90,10 @@
     if (animate !== false) Sidebar.el.classList.add("is-animate");
     else Sidebar.el.classList.remove("is-animate");
     localStorage.setItem("investor_sidebar", "true");
-    if (Sidebar.toggleBtn) Sidebar.toggleBtn.classList.add("active");
+    if (Sidebar.toggleBtn) {
+      Sidebar.toggleBtn.classList.add("active");
+      Sidebar.toggleBtn.setAttribute("aria-expanded", "true");
+    }
     Sidebar._fetchAll();
     Sidebar._startRefresh();
   };
@@ -89,7 +103,10 @@
     Sidebar.visible = false;
     Sidebar.el.classList.remove("is-open");
     localStorage.setItem("investor_sidebar", "false");
-    if (Sidebar.toggleBtn) Sidebar.toggleBtn.classList.remove("active");
+    if (Sidebar.toggleBtn) {
+      Sidebar.toggleBtn.classList.remove("active");
+      Sidebar.toggleBtn.setAttribute("aria-expanded", "false");
+    }
     Sidebar._stopRefresh();
   };
 
@@ -113,6 +130,7 @@
     Sidebar._loadPortfolio();
     Sidebar._loadRiskProfile();
     Sidebar._loadAlerts();
+    Sidebar._loadKnowledge();
   };
 
   /* -- watchlist -- */
@@ -157,12 +175,7 @@
   Sidebar._onWatchlistClick = function (e) {
     var symbol = this.getAttribute("data-symbol");
     if (!symbol) return;
-    // focus the chat input and pre-fill with a quick query
-    var input = document.getElementById("chat-input");
-    if (input) {
-      input.focus();
-      Sidebar._sendQuickQuery("快速分析一下 " + symbol + " 当前走势");
-    }
+    Sidebar._sendQuickQuery("快速分析一下 " + symbol + " 当前走势");
   };
 
   Sidebar._onWatchlistRemove = function (e) {
@@ -200,41 +213,57 @@
   Sidebar._renderPortfolio = function (data) {
     var el = Sidebar.el && Sidebar.el.querySelector(".sidebar-portfolio-body");
     if (!el) return;
+
+    var actions =
+      '<div class="sidebar-pf-actions">' +
+      '  <button class="sidebar-btn" id="sidebar-add-holding">加仓 / 添加持仓</button>' +
+      '</div>';
+
+    var html;
     if (!data) {
-      el.innerHTML = '<div class="sidebar-empty">暂无组合，请先创建</div>';
-      return;
-    }
-    if (!data.holdings || !data.holdings.length) {
-      el.innerHTML =
+      html =
+        '<div class="sidebar-empty">暂无组合，请先创建</div>' +
+        '<div class="sidebar-pf-actions">' +
+        '  <button class="sidebar-btn" id="sidebar-add-pf-body">新建组合</button>' +
+        '</div>';
+    } else if (!data.holdings || !data.holdings.length) {
+      html =
         '<div class="sidebar-pnl">总市值 ¥' +
         (data.total_value || 0).toLocaleString("zh-CN", { maximumFractionDigits: 2 }) +
         '</div>' +
-        '<div class="sidebar-empty">暂无持仓记录</div>';
-      return;
+        '<div class="sidebar-empty">暂无持仓记录</div>' + actions;
+    } else {
+      var total = data.total_value || 0;
+      var cost = data.total_cost || 0;
+      var pnl = total - cost;
+      var pnlPct = cost > 0 ? ((pnl / cost) * 100) : 0;
+      var pnlClass = pnl >= 0 ? "sidebar-up" : "sidebar-down";
+      var pnlSign = pnl >= 0 ? "+" : "";
+      html =
+        '<div class="sidebar-pnl ' + pnlClass + '">' +
+        '  总市值 ¥' + total.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) +
+        '  <span>盈亏：' + pnlSign + pnl.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) +
+        ' (' + pnlSign + pnlPct.toFixed(2) + '%)</span>' +
+        '</div>' +
+        '<div class="sidebar-holdings">' +
+        data.holdings.slice(0, 5).map(function (h) {
+          return (
+            '<div class="sidebar-hold-item">' +
+            '  <span class="sidebar-hl-sym">' + Sidebar._esc(h.symbol || h.code) + '</span>' +
+            '  <span class="sidebar-hl-qty">' + (h.shares || 0) + '股</span>' +
+            '</div>'
+          );
+        }).join("") +
+        '</div>' + actions;
     }
-    var total = data.total_value || 0;
-    var cost = data.total_cost || 0;
-    var pnl = total - cost;
-    var pnlPct = cost > 0 ? ((pnl / cost) * 100) : 0;
-    var pnlClass = pnl >= 0 ? "sidebar-up" : "sidebar-down";
-    var pnlSign = pnl >= 0 ? "+" : "";
+    el.innerHTML = html;
 
-    el.innerHTML =
-      '<div class="sidebar-pnl ' + pnlClass + '">' +
-      '  总市值 ¥' + total.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) +
-      '  <span>盈亏：' + pnlSign + pnl.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) +
-      ' (' + pnlSign + pnlPct.toFixed(2) + '%)</span>' +
-      '</div>' +
-      '<div class="sidebar-holdings">' +
-      data.holdings.slice(0, 5).map(function (h) {
-        return (
-          '<div class="sidebar-hold-item">' +
-          '  <span class="sidebar-hl-sym">' + Sidebar._esc(h.symbol || h.code) + '</span>' +
-          '  <span class="sidebar-hl-qty">' + (h.shares || 0) + '股</span>' +
-          '</div>'
-        );
-      }).join("") +
-      '</div>';
+    // Bind the dynamically-rendered action buttons here (the body is
+    // re-rendered on every fetch, so binding in show() would miss them).
+    var addHolding = el.querySelector("#sidebar-add-holding");
+    if (addHolding) addHolding.addEventListener("click", Sidebar._onAddHolding);
+    var addPfBody = el.querySelector("#sidebar-add-pf-body");
+    if (addPfBody) addPfBody.addEventListener("click", Sidebar._onAddPortfolio);
   };
 
   /* -- risk profile -- */
@@ -399,51 +428,305 @@
     }
   };
 
-  /* -- add watchlist -- */
+  /* -- knowledge base (upload / list / delete) --
+   * Uses the USER token (API.userFetch): the /knowledge-base endpoints are
+   * user-scoped (get_current_user), unlike the session-scoped watchlist /
+   * portfolio / alerts routers. */
 
-  Sidebar._onAddWatchlist = function () {
-    var symbol = prompt("请输入股票代码（如 sh600519）：");
-    if (!symbol) return;
-    var name = prompt("股票名称（可选）：") || "";
-    var qs = "symbol=" + encodeURIComponent(symbol);
-    if (name) qs += "&name=" + encodeURIComponent(name);
-    API.authFetch("/watchlist?" + qs, { method: "POST" })
-      .then(function () { Sidebar._loadWatchlist(); })
+  Sidebar._loadKnowledge = function () {
+    if (!Sidebar.features.knowledge) return;
+    API.userFetch("/knowledge-base/documents")
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (items) { Sidebar._renderKnowledge(items); })
       .catch(function () { /* silent */ });
   };
 
+  Sidebar._renderKnowledge = function (items) {
+    var el = Sidebar.el && Sidebar.el.querySelector(".sidebar-kb-body");
+    if (!el) return;
+    if (!items || !items.length) {
+      el.innerHTML = '<div class="sidebar-empty">暂无文档，点 + 上传研报 / 资料</div>';
+      return;
+    }
+    el.innerHTML = items.map(function (d) {
+      return (
+        '<div class="sidebar-kb-item" data-id="' + Sidebar._esc(d.doc_id) + '">' +
+        '  <span class="sidebar-kb-name" title="' + Sidebar._esc(d.filename) + '">' + Sidebar._esc(d.filename) + '</span>' +
+        '  <span class="sidebar-kb-chunks">' + (d.chunk_count || 0) + ' 段</span>' +
+        '  <button class="sidebar-kb-del" data-id="' + Sidebar._esc(d.doc_id) + '" title="删除">×</button>' +
+        '</div>'
+      );
+    }).join("");
+
+    var dels = el.querySelectorAll(".sidebar-kb-del");
+    for (var i = 0; i < dels.length; i++) {
+      dels[i].addEventListener("click", function (e) {
+        e.stopPropagation();
+        Sidebar._onDeleteDoc(this.getAttribute("data-id"));
+      });
+    }
+  };
+
+  /* Opens the hidden file picker; the actual upload happens on `change`. */
+  Sidebar._onUploadDoc = function () {
+    var input = document.getElementById("sidebar-kb-file");
+    if (input) input.click();
+  };
+
+  Sidebar._onKbFileChosen = function () {
+    var input = document.getElementById("sidebar-kb-file");
+    if (!input || !input.files || !input.files.length) return;
+    var file = input.files[0];
+    var el = Sidebar.el && Sidebar.el.querySelector(".sidebar-kb-body");
+    if (el) el.innerHTML = '<div class="sidebar-empty">正在上传 ' + Sidebar._esc(file.name) + ' …</div>';
+
+    var fd = new FormData();
+    fd.append("file", file); // backend field name is `file` (UploadFile)
+    // Do NOT set Content-Type — the browser must add the multipart boundary.
+    API.userFetch("/knowledge-base/upload", { method: "POST", body: fd })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.text().then(function (t) { throw new Error(Sidebar._parseErr(t, r.status)); });
+        }
+        return r.json();
+      })
+      .then(function (data) {
+        input.value = "";
+        Sidebar._loadKnowledge();
+        var name = (data && data.filename) || file.name;
+        var chunks = (data && data.chunk_count) || 0;
+        if (el) el.innerHTML = '<div class="sidebar-empty sidebar-kb-ok">已索引 ' + Sidebar._esc(name) + '（' + chunks + ' 段）</div>';
+        setTimeout(function () { Sidebar._loadKnowledge(); }, 1200);
+      })
+      .catch(function (err) {
+        input.value = "";
+        if (el) {
+          el.innerHTML = '<div class="sidebar-empty sidebar-err">上传失败：' +
+            Sidebar._esc(err && err.message ? err.message : "未知错误") + '</div>';
+        }
+        setTimeout(function () { Sidebar._loadKnowledge(); }, 2500);
+      });
+  };
+
+  Sidebar._onDeleteDoc = function (docId) {
+    if (!docId) return;
+    API.userFetch("/knowledge-base/documents/" + encodeURIComponent(docId), { method: "DELETE" })
+      .then(function () { setTimeout(Sidebar._loadKnowledge, 300); })
+      .catch(function () { /* silent */ });
+  };
+
+  /* Minimal error-body parser (mirrors api.js parseError) for the KB upload,
+   * which needs the backend's `detail` message (e.g. unsupported file type). */
+  Sidebar._parseErr = function (text, status) {
+    try {
+      var j = JSON.parse(text);
+      if (j.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+    } catch (e) { /* not json */ }
+    return "请求失败 (HTTP " + status + ")";
+  };
+
+  /* -- generic inline dialog (replaces window.prompt) -- */
+
+  Sidebar._dialog = function (id, title, fields, onSave) {
+    var prev = document.getElementById(id);
+    if (prev) prev.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = id;
+    overlay.className = "sidebar-dialog-overlay";
+
+    var box = document.createElement("div");
+    box.className = "sidebar-dialog";
+
+    var h = document.createElement("h4");
+    h.textContent = title;
+    box.appendChild(h);
+
+    var inputs = {};
+    fields.forEach(function (f) {
+      var label = document.createElement("label");
+      label.appendChild(document.createTextNode(f.label));
+      var el;
+      if (f.type === "select") {
+        el = document.createElement("select");
+        (f.options || []).forEach(function (o) {
+          var opt = document.createElement("option");
+          opt.value = o.value;
+          opt.textContent = o.text;
+          if (o.value === f.value) opt.selected = true;
+          el.appendChild(opt);
+        });
+      } else {
+        el = document.createElement("input");
+        el.type = f.type || "text";
+        if (f.placeholder) el.placeholder = f.placeholder;
+        if (f.value !== undefined) el.value = f.value;
+        if (f.min !== undefined) el.min = f.min;
+        if (f.step !== undefined) el.step = f.step;
+      }
+      label.appendChild(el);
+      box.appendChild(label);
+      inputs[f.key] = el;
+    });
+
+    var actions = document.createElement("div");
+    actions.className = "sidebar-dialog-actions";
+    var save = document.createElement("button");
+    save.className = "sidebar-btn";
+    save.textContent = "保存";
+    var cancel = document.createElement("button");
+    cancel.className = "sidebar-btn sidebar-btn-ghost";
+    cancel.textContent = "取消";
+    actions.appendChild(save);
+    actions.appendChild(cancel);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    function close() { if (overlay.parentNode) overlay.remove(); }
+    cancel.addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+    save.addEventListener("click", function () {
+      var values = {};
+      Object.keys(inputs).forEach(function (k) { values[k] = inputs[k].value; });
+      if (onSave(values) !== false) close();
+    });
+    if (fields.length && inputs[fields[0].key]) inputs[fields[0].key].focus();
+    return { close: close, inputs: inputs };
+  };
+
+  /* -- add watchlist -- */
+
+  Sidebar._onAddWatchlist = function () {
+    Sidebar._dialog("sidebar-wl-dialog", "添加自选股", [
+      { key: "symbol", label: "股票代码", placeholder: "如 sh600519 / sz000001" },
+      { key: "name", label: "名称（可选）", placeholder: "如 贵州茅台" },
+    ], function (v) {
+      var symbol = (v.symbol || "").trim();
+      if (!symbol) return false;
+      var qs = "symbol=" + encodeURIComponent(symbol);
+      if (v.name) qs += "&name=" + encodeURIComponent(v.name);
+      API.authFetch("/watchlist?" + qs, { method: "POST" })
+        .then(function () { Sidebar._loadWatchlist(); })
+        .catch(function () { /* silent */ });
+      return true;
+    });
+  };
+
+  /* -- add alert -- */
+
   Sidebar._onAddAlert = function () {
-    var symbol = prompt("请输入股票代码（如 sh600519）：");
-    if (!symbol) return;
-    var cond = prompt("触发条件（above 突破上方 / below 跌破下方）：", "above");
-    if (!cond || (cond !== "above" && cond !== "below")) return;
-    var price = parseFloat(prompt("触发价格（元）："));
-    if (isNaN(price) || price <= 0) return;
-    var note = prompt("备注（可选）：") || "";
-    API.authFetch("/alerts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        symbol: symbol,
-        condition: cond,
-        price: price,
-        note: note,
-      }),
-    }).then(function () { Sidebar._loadAlerts(); })
+    Sidebar._dialog("sidebar-alert-dialog", "添加价格预警", [
+      { key: "symbol", label: "股票代码", placeholder: "如 sh600519" },
+      {
+        key: "condition", label: "触发条件", type: "select", value: "above",
+        options: [
+          { value: "above", text: "突破上方" },
+          { value: "below", text: "跌破下方" },
+        ],
+      },
+      { key: "price", label: "触发价格（元）", type: "number", min: "0", step: "0.01", placeholder: "如 1800" },
+      { key: "note", label: "备注（可选）", placeholder: "如 突破前高" },
+    ], function (v) {
+      var symbol = (v.symbol || "").trim();
+      var price = parseFloat(v.price);
+      if (!symbol || isNaN(price) || price <= 0) return false;
+      API.authFetch("/alerts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: symbol,
+          condition: v.condition || "above",
+          price: price,
+          note: v.note || "",
+        }),
+      }).then(function () { Sidebar._loadAlerts(); })
+        .catch(function () { /* silent */ });
+      return true;
+    });
+  };
+
+  /* -- portfolio: create / add holding -- */
+
+  Sidebar._onAddPortfolio = function () {
+    Sidebar._dialog("sidebar-pf-dialog", "新建组合", [
+      { key: "name", label: "组合名称", value: "我的组合" },
+      {
+        key: "risk_tolerance", label: "风险偏好", type: "select", value: "balanced",
+        options: [
+          { value: "conservative", text: "保守型" },
+          { value: "balanced", text: "稳健型" },
+          { value: "aggressive", text: "激进型" },
+        ],
+      },
+      { key: "cash", label: "可用现金（元）", type: "number", min: "0", step: "100", value: "0" },
+    ], function (v) {
+      API.authFetch("/portfolio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: v.name || "我的组合",
+          risk_tolerance: v.risk_tolerance || "balanced",
+          cash: parseFloat(v.cash) || 0,
+        }),
+      }).then(function () { Sidebar._loadPortfolio(); })
+        .catch(function () { /* silent */ });
+      return true;
+    });
+  };
+
+  Sidebar._onAddHolding = function () {
+    API.authFetch("/portfolio")
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (items) {
+        // No portfolio yet -> guide the user into creating one first.
+        if (!items || !items.length) { Sidebar._onAddPortfolio(); return; }
+        var pid = items[0].id;
+        Sidebar._dialog("sidebar-hold-dialog", "加仓 / 添加持仓", [
+          { key: "symbol", label: "股票代码", placeholder: "如 sh600519" },
+          { key: "name", label: "名称（可选）", placeholder: "如 贵州茅台" },
+          { key: "shares", label: "股数", type: "number", min: "0", step: "100", value: "100" },
+          { key: "cost_price", label: "成本价（元/股）", type: "number", min: "0", step: "0.01", placeholder: "如 1680" },
+        ], function (v) {
+          var symbol = (v.symbol || "").trim();
+          var shares = parseFloat(v.shares);
+          if (!symbol || isNaN(shares) || shares <= 0) return false;
+          API.authFetch("/portfolio/" + encodeURIComponent(pid) + "/holdings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              symbol: symbol,
+              name: v.name || "",
+              shares: shares,
+              cost_price: parseFloat(v.cost_price) || 0,
+            }),
+          }).then(function () { Sidebar._loadPortfolio(); })
+            .catch(function () { /* silent */ });
+          return true;
+        });
+      })
       .catch(function () { /* silent */ });
   };
 
   /* -- helpers -- */
 
   Sidebar._sendQuickQuery = function (query) {
-    var input = document.getElementById("chat-input");
-    if (!input) return;
-    // Use a simple approach: set the input value and dispatch an input event
-    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype, "value"
-    ).set;
-    nativeInputValueSetter.call(input, query);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    // Delegate to the active Investor controller so the message travels the
+    // real send() pipeline (user bubble + SSE stream) instead of only
+    // pre-filling a textarea. The chat textarea id is "chat-text" (owned by
+    // investor.js); the controller owns the send() call.
+    var ctrl = global.App && global.App.current;
+    if (ctrl && ctrl.input && typeof ctrl.send === "function") {
+      // Collapse the overlay panel so the streamed answer is not covered
+      // (the panel is position:fixed and overlays the right side of chat).
+      if (Sidebar.visible) Sidebar.hide();
+      ctrl.input.value = query;
+      ctrl.send();
+      return;
+    }
+    // Fallback: prefill only, let the user press Enter.
+    var ta = document.getElementById("chat-text");
+    if (ta) { ta.value = query; ta.focus(); }
   };
 
   Sidebar._esc = function (s) {
@@ -476,6 +759,7 @@
         '<div class="sidebar-section">' +
         '  <div class="sidebar-section-hd">' +
         '    <span>📈 组合概览</span>' +
+        '    <button class="sidebar-add-btn" id="sidebar-add-pf" aria-label="新建组合" title="新建组合">+</button>' +
         '  </div>' +
         '  <div class="sidebar-portfolio-body sidebar-section-bd"></div>' +
         '</div>'
@@ -499,6 +783,19 @@
         '    <button class="sidebar-add-btn" id="sidebar-add-alert" aria-label="添加预警" title="添加预警">+</button>' +
         '  </div>' +
         '  <div class="sidebar-alert-list sidebar-section-bd"></div>' +
+        '</div>'
+      );
+    }
+    if (Sidebar.features.knowledge) {
+      sections.push(
+        '<div class="sidebar-section">' +
+        '  <div class="sidebar-section-hd">' +
+        '    <span>📚 知识库</span>' +
+        '    <button class="sidebar-add-btn" id="sidebar-add-kb" aria-label="上传文档" title="上传文档（md/txt/pdf/json/yaml，≤10MB）">+</button>' +
+        '  </div>' +
+        '  <div class="sidebar-kb-body sidebar-section-bd"></div>' +
+        '  <input type="file" id="sidebar-kb-file" class="sidebar-kb-file" hidden ' +
+        '         accept=".md,.txt,.pdf,.json,.yaml,.yml">' +
         '</div>'
       );
     }
@@ -548,26 +845,49 @@
           .catch(function () { Sidebar.features.alert = false; })
       );
     }
+    if (Sidebar.features.knowledge) {
+      // User-scoped endpoint -> user token (not the session token).
+      checks.push(
+        API.userFetch("/knowledge-base/documents")
+          .then(function (r) { Sidebar.features.knowledge = r.ok; })
+          .catch(function () { Sidebar.features.knowledge = false; })
+      );
+    }
     return Promise.all(checks).then(function () {
-      // Rebuild template with detected features
+      // Rebuild template with detected features, then re-bind controls
+      // (innerHTML replacement drops the previous listeners).
       if (Sidebar.el) {
         Sidebar.el.innerHTML = Sidebar._template();
+        Sidebar._bindControls();
         setTimeout(function () { Sidebar._fetchAll(); }, 100);
       }
     });
   };
 
-  // Bind events after template render
+  /* (Re)bind the template's interactive controls. Idempotent (remove-then-add)
+   * because the template is rebuilt on feature detection and mount() runs on
+   * every mode switch. */
+  Sidebar._bindControls = function () {
+    var bindings = [
+      ["sidebar-add-wl", "click", Sidebar._onAddWatchlist],
+      ["sidebar-add-alert", "click", Sidebar._onAddAlert],
+      ["sidebar-add-pf", "click", Sidebar._onAddPortfolio],
+      ["sidebar-add-kb", "click", Sidebar._onUploadDoc],
+      ["sidebar-kb-file", "change", Sidebar._onKbFileChosen],
+    ];
+    bindings.forEach(function (b) {
+      var el = document.getElementById(b[0]);
+      if (!el) return;
+      el.removeEventListener(b[1], b[2]);
+      el.addEventListener(b[1], b[2]);
+    });
+  };
+
+  // Bind controls after each show — the template may have been rebuilt.
   var origShow = Sidebar.show;
   Sidebar.show = function (animate) {
     origShow(animate);
-    // Re-bind add buttons
-    setTimeout(function () {
-      var addWl = document.getElementById("sidebar-add-wl");
-      if (addWl) addWl.addEventListener("click", Sidebar._onAddWatchlist);
-      var addAlert = document.getElementById("sidebar-add-alert");
-      if (addAlert) addAlert.addEventListener("click", Sidebar._onAddAlert);
-    }, 50);
+    setTimeout(Sidebar._bindControls, 50);
   };
 
   global.Sidebar = Sidebar;

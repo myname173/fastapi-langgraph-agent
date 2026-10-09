@@ -29,7 +29,7 @@ from app.services.goal_service import goal_service
 from app.services.sdlc_task_service import sdlc_task_service
 from app.utils.errors import safe_500, safe_stream_error
 
-SDLCStatus = Literal["specing", "planning", "coding", "testing", "reviewing", "completed"]
+SDLCStatus = Literal["specing", "planning", "coding", "testing", "reviewing", "completed", "failed"]
 
 router = APIRouter()
 orchestrator = SupervisorGraph()
@@ -172,6 +172,7 @@ async def sdlc_orchestrate(
                 user_id=session.user_id,
                 requirements=sdlc_request.requirements,
                 goal_id=sdlc_request.goal_id,
+                coder_model=sdlc_request.coder_model,
             )
         except ValueError as ve:
             raise HTTPException(status_code=429, detail=str(ve))
@@ -293,6 +294,7 @@ async def sdlc_orchestrate_stream(
                     user_id=session.user_id,
                     requirements=sdlc_request.requirements,
                     goal_id=sdlc_request.goal_id,
+                    coder_model=sdlc_request.coder_model,
                 )
             except ValueError as ve:
                 yield f"data: {json.dumps({'event': 'error', 'data': {'error': str(ve)}})}\n\n"
@@ -375,6 +377,7 @@ async def sdlc_get_feature_flags(
         return {
             "ENABLE_SMART_CODER": settings.ENABLE_SMART_CODER,
             "ENABLE_MULTIMODAL": settings.ENABLE_MULTIMODAL,
+            "ENABLE_MEDIA_GENERATION": settings.ENABLE_MEDIA_GENERATION,
             "ENABLE_SCRIPT_EXECUTION": settings.ENABLE_SCRIPT_EXECUTION,
             "ENABLE_RESOURCE_QUOTA": settings.ENABLE_RESOURCE_QUOTA,
             "ENABLE_SMART_SEARCH": settings.ENABLE_SMART_SEARCH,

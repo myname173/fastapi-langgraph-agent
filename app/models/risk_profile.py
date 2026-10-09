@@ -11,10 +11,11 @@ from datetime import datetime, UTC
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
 from app.models.portfolio import RiskTolerance
 
 
-class RiskProfile(SQLModel, table=True):
+class RiskProfile(UTCDateTimeMixin, SQLModel, table=True):
     """A user's investment risk profile (one row per user)."""
 
     __tablename__ = "risk_profile"  # pyright: ignore[reportAssignmentType]

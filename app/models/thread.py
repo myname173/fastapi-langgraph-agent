@@ -10,8 +10,10 @@ from sqlmodel import (
     SQLModel,
 )
 
+from app.models.base import UTCDateTimeMixin
 
-class Thread(SQLModel, table=True):
+
+class Thread(UTCDateTimeMixin, SQLModel, table=True):
     """Thread model for storing conversation threads.
 
     Attributes:

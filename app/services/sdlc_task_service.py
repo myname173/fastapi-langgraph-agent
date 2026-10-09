@@ -1,7 +1,7 @@
 """SDLC Task Service for managing SDLC workflow tasks."""
 
 import shutil
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from typing import List, Optional
 
 from sqlmodel import Session, desc, select
@@ -26,7 +26,13 @@ class SDLCTaskService:
     # ------------------------------------------------------------------
 
     def _create_task_sync(
-        self, task_id: str, thread_id: str, user_id: Optional[int], requirements: str, goal_id: Optional[str] = None
+        self,
+        task_id: str,
+        thread_id: str,
+        user_id: Optional[int],
+        requirements: str,
+        goal_id: Optional[str] = None,
+        coder_model: Optional[str] = None,
     ) -> SDLCTask:
         def _block(session: Session) -> SDLCTask:
             task = SDLCTask(
@@ -36,6 +42,7 @@ class SDLCTaskService:
                 status=SDLCTaskStatus.PLANNING,
                 requirements=requirements,
                 goal_id=goal_id,
+                coder_model=coder_model,
             )
             session.add(task)
             session.commit()
@@ -164,6 +171,7 @@ class SDLCTaskService:
         user_id: Optional[int],
         requirements: str,
         goal_id: Optional[str] = None,
+        coder_model: Optional[str] = None,
     ) -> SDLCTask:
         async with get_async_session_maker()() as session:
             task = SDLCTask(
@@ -173,6 +181,7 @@ class SDLCTaskService:
                 status=SDLCTaskStatus.PLANNING,
                 requirements=requirements,
                 goal_id=goal_id,
+                coder_model=coder_model,
             )
             session.add(task)
             await session.commit()
@@ -281,8 +290,22 @@ class SDLCTaskService:
         user_id: Optional[int] = None,
         requirements: str = "",
         goal_id: Optional[str] = None,
+        coder_model: Optional[str] = None,
     ) -> SDLCTask:
         """Create a new SDLC task.
+
+        Args:
+            task_id: Stable identifier for the task, used by the frontend and
+                the agent graph to refer to the same run.
+            thread_id: LangGraph thread this task is checkpointed under.
+            user_id: Owning user. ``None`` skips the per-user quota gate.
+            requirements: Raw requirement text the agent plans against.
+            goal_id: Optional investment goal this task is attached to.
+            coder_model: Coder model the run is being launched with, recorded
+                so the task list can display it (NULL when unset/default).
+
+        Returns:
+            The persisted ``SDLCTask`` row.
 
         Raises:
             ValueError: If user has exceeded active task quota.
@@ -295,9 +318,16 @@ class SDLCTaskService:
         # at entry when over quota, preserving the old error contract.
         async with quota_service.reserve_task_slot(user_id):
             if settings.ENABLE_ASYNC_DB:
-                return await self._create_task_async(task_id, thread_id, user_id, requirements, goal_id)
+                return await self._create_task_async(task_id, thread_id, user_id, requirements, goal_id, coder_model)
             return await run_in_thread(
-                self._create_task_sync, task_id, thread_id, user_id, requirements, goal_id, op="sdlc_create_task"
+                self._create_task_sync,
+                task_id,
+                thread_id,
+                user_id,
+                requirements,
+                goal_id,
+                coder_model,
+                op="sdlc_create_task",
             )
 
     async def get_task(self, task_id: str) -> Optional[SDLCTask]:
@@ -433,6 +463,120 @@ class SDLCTaskService:
 
         await self.cleanup_task_resources(thread_id)
         return True
+
+    # ------------------------------------------------------------------
+    # Stale-task reaping
+    # ------------------------------------------------------------------
+
+    #: Statuses meaning "still in flight". ``PAUSED`` is deliberately excluded
+    #: — it is a state the user chose, not evidence of an interrupted run.
+    ACTIVE_STATUSES: tuple = (
+        SDLCTaskStatus.SPECING,
+        SDLCTaskStatus.PLANNING,
+        SDLCTaskStatus.CODING,
+        SDLCTaskStatus.TESTING,
+        SDLCTaskStatus.REVIEWING,
+    )
+
+    def _reap_stale_tasks_sync(self, timeout_minutes: int) -> int:
+        """Mark non-terminal tasks not updated within the timeout as FAILED.
+
+        An interrupted run (process restart, crash, aborted SSE stream) never
+        writes a terminal status, so its row sits in 「进行中」 forever. Nothing
+        else in the system transitions it, which is why the list accumulated
+        tasks that had been dead for weeks.
+
+        Args:
+            timeout_minutes: Age (by ``updated_at``) past which a non-terminal
+                task is considered dead.
+
+        Returns:
+            Number of tasks reaped.
+        """
+        cutoff = datetime.now(UTC) - timedelta(minutes=timeout_minutes)
+
+        def _block(session: Session) -> int:
+            result = session.exec(
+                select(SDLCTask).where(
+                    # Pass the enum members. The column is a SQLAlchemy Enum
+                    # whose value set is the member *names* ('PLANNING', ...);
+                    # the bind processor normalises members (and their .value
+                    # strings) to those names, so this matches what is stored.
+                    SDLCTask.status.in_(self.ACTIVE_STATUSES),
+                    SDLCTask.updated_at < cutoff,
+                )
+            )
+            stale = list(result.all())
+            now = datetime.now(UTC)
+            for task in stale:
+                previous_status = task.status
+                task.status = SDLCTaskStatus.FAILED
+                task.updated_at = now
+                session.add(task)
+                logger.warning(
+                    "sdlc_stale_task_reaped",
+                    task_id=task.id,
+                    previous_status=str(previous_status),
+                    timeout_minutes=timeout_minutes,
+                )
+            if stale:
+                session.commit()
+            return len(stale)
+
+        return database_service.run_in_session(_block, op="sdlc_reap_stale_tasks")
+
+    async def _reap_stale_tasks_async(self, timeout_minutes: int) -> int:
+        cutoff = datetime.now(UTC) - timedelta(minutes=timeout_minutes)
+        async with get_async_session_maker()() as session:
+            result = await session.execute(
+                select(SDLCTask).where(
+                    SDLCTask.status.in_(self.ACTIVE_STATUSES),
+                    SDLCTask.updated_at < cutoff,
+                )
+            )
+            stale = list(result.scalars().all())
+            now = datetime.now(UTC)
+            for task in stale:
+                previous_status = task.status
+                task.status = SDLCTaskStatus.FAILED
+                task.updated_at = now
+                session.add(task)
+                logger.warning(
+                    "sdlc_stale_task_reaped",
+                    task_id=task.id,
+                    previous_status=str(previous_status),
+                    timeout_minutes=timeout_minutes,
+                )
+            if stale:
+                await session.commit()
+            return len(stale)
+
+    async def reap_stale_tasks(self, timeout_minutes: Optional[int] = None) -> int:
+        """Reap interrupted tasks left in a non-terminal status.
+
+        Best-effort: a failure here must never prevent the app from starting.
+
+        Args:
+            timeout_minutes: Override the configured threshold. ``0`` disables.
+
+        Returns:
+            Number of tasks reaped (0 on any failure).
+        """
+        minutes = settings.SDLC_STALE_TASK_TIMEOUT_MINUTES if timeout_minutes is None else timeout_minutes
+        if minutes <= 0:
+            return 0
+        try:
+            if settings.ENABLE_ASYNC_DB:
+                reaped = await self._reap_stale_tasks_async(minutes)
+            else:
+                reaped = await run_in_thread(self._reap_stale_tasks_sync, minutes, op="sdlc_reap_stale_tasks")
+            if reaped:
+                sdlc_cleanup_count.labels(resource_type="stale_tasks").inc(reaped)
+                logger.info("sdlc_stale_tasks_reaped", count=reaped, timeout_minutes=minutes)
+            return reaped
+        except Exception as e:
+            logger.exception("sdlc_stale_task_reap_failed", error=str(e))
+            return 0
 
 
 sdlc_task_service = SDLCTaskService()

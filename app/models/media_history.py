@@ -6,6 +6,8 @@ from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
+
 
 class MediaType(str, Enum):
     """Media generation type."""
@@ -21,7 +23,7 @@ class MediaStatus(str, Enum):
     FAILED = "failed"
 
 
-class MediaHistory(SQLModel, table=True):
+class MediaHistory(UTCDateTimeMixin, SQLModel, table=True):
     """MediaHistory model for storing media generation audit records.
 
     Each row records one generation request (image or video) made via the

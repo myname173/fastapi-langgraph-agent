@@ -40,7 +40,21 @@ class LLMExecutionService:
         error_type: Optional[str] = None,
     ) -> None:
         """Persist one attempt when an execution id is available."""
-        if not settings.ENABLE_LLM_EXECUTION_AUDIT or not execution_id:
+        if not settings.ENABLE_LLM_EXECUTION_AUDIT:
+            return
+        if not execution_id:
+            # Auditing must never break a task, so this stays a no-op — but it
+            # must not be *silent*. SDLC agent calls produced zero audit rows
+            # for months because the node wrapper was not receiving `config`
+            # (LangGraph only injects it when the parameter is annotated
+            # `RunnableConfig`), so `thread_id` was always None here. Without
+            # this log the only symptom was an empty UI panel.
+            logger.debug(
+                "llm_execution_audit_skipped_no_execution_id",
+                agent_name=agent_name,
+                purpose=purpose,
+                effective_model=effective_model,
+            )
             return
         entry = LLMExecution(
             id=str(uuid.uuid4()),

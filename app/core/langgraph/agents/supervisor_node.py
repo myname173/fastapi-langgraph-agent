@@ -97,7 +97,12 @@ def make_supervisor_node(ctx: AgentContext) -> NodeCallable:
                 return Command(
                     update={
                         "is_complete": True,
-                        "status": "completed",
+                        # "failed", not "completed": the workflow gave up because
+                        # an agent kept erroring, so it produced no usable output.
+                        # Reporting "completed" here made a total failure look like
+                        # success in the UI and in GET /tasks (the metric above
+                        # already counted it as a failure).
+                        "status": "failed",
                         "messages": [
                             {
                                 "role": "assistant",
@@ -126,7 +131,13 @@ def make_supervisor_node(ctx: AgentContext) -> NodeCallable:
             # PO guard: requirements exist but no spec yet → produce spec first.
             # A fallback entry ({"fallback": True, ...}) counts as "present"
             # so PO failure does not dead-loop here.
-            if requirements.strip() and not product_spec:
+            # C-9 fix: only force PO when the workflow has not already advanced
+            # past it. If code/tests/feedback already exist, a missing spec is a
+            # stale-state artifact (e.g. MemorySaver checkpoint not retaining the
+            # PO write) — forcing PO again would dead-loop tester→supervisor→po.
+            # In that case fall through to the later guards / normal routing.
+            _advanced_past_po = bool(plan or code_changes or test_results or feedback)
+            if requirements.strip() and not product_spec and not _advanced_past_po:
                 logger.warning(
                     "sdlc_supervisor_guard_force_po",
                     reason="requirements_present_spec_empty",
@@ -240,6 +251,56 @@ def make_supervisor_node(ctx: AgentContext) -> NodeCallable:
             forced = _force_route()
             if forced is not None:
                 return forced
+            session_id = config.get("configurable", {}).get("thread_id")
+            logger.info("sdlc_workflow_completed", session_id=session_id)
+            sdlc_workflow_completed_total.labels(status="success", task_type="general").inc()
+            return Command(
+                update={"is_complete": True, "status": "completed"},
+                goto=END,
+            )
+
+        # ------------------------------------------------------------------
+        # Layer 0c: defend against the LLM looping coder<->tester after code
+        # has been written and tested but the reviewer hasn't weighed in. In
+        # that state the canonical next stage is the reviewer (bounded by
+        # reviewer_retry_count inside _force_route), not re-entering coding/
+        # testing. Without this, a failing test runner (e.g. sandbox unavailable)
+        # makes the supervisor trust the LLM's "go fix it in coder" decision
+        # repeatedly, spinning coder<->tester until recursion_limit.
+        # ------------------------------------------------------------------
+        if response.next_agent in ("coder", "tester") and code_changes and test_results and not feedback:
+            forced = _force_route()
+            if forced is not None:
+                return forced
+
+        # ------------------------------------------------------------------
+        # Layer 0d: anti-loop guard. If the LLM routes back to an agent whose
+        # canonical stage is ALREADY complete (e.g. planner already produced a
+        # plan, coder already produced code), trusting that routing would spin
+        # planner->supervisor->planner forever until recursion_limit (seen on
+        # the security_repair_sqli task with an unstable model). Instead, when
+        # the LLM points at a finished stage, ignore it and advance to the next
+        # still-incomplete stage; if all stages are done, force completion.
+        # ------------------------------------------------------------------
+        _stage_complete = {
+            "po": bool(product_spec),
+            "planner": bool(plan),
+            "coder": bool(code_changes),
+            "tester": bool(test_results),
+            "reviewer": bool(feedback),
+        }
+        _llm_target = response.next_agent
+        if _llm_target in _stage_complete and _stage_complete.get(_llm_target):
+            logger.warning(
+                "sdlc_supervisor_anti_loop_override",
+                llm_target=_llm_target,
+                reason="stage_already_complete",
+            )
+            forced = _force_route()
+            if forced is not None:
+                return forced
+            # All mandatory stages done but LLM keeps looping a finished stage:
+            # force workflow completion instead of exhausting recursion_limit.
             session_id = config.get("configurable", {}).get("thread_id")
             logger.info("sdlc_workflow_completed", session_id=session_id)
             sdlc_workflow_completed_total.labels(status="success", task_type="general").inc()

@@ -51,7 +51,7 @@ class SDLCState(TypedDict):
     human_approval_needed: bool
     # "specing" is the PO phase, inserted before "planning" in the SDLC
     # state machine: requirements → po (specing) → planner (planning) → ...
-    status: Literal["specing", "planning", "coding", "testing", "reviewing", "completed"]
+    status: Literal["specing", "planning", "coding", "testing", "reviewing", "completed", "failed"]
     is_complete: bool
 
     validation_results: Annotated[list[dict], replace_list_reducer]

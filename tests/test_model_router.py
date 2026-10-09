@@ -39,39 +39,39 @@ class TestRoutingTable:
 
 
 class TestModelRouterGetModelFor:
-    """Tests for ModelRouter.get_model_for()."""
+    """Tests for ModelRouter.get_model_for().
 
-    def test_supervisor_returns_medium_tier(self):
-        """Supervisor → qwen3.7-plus (medium tier, simple routing)."""
-        router = ModelRouter()
-        assert router.get_model_for("supervisor") == "qwen3.7-plus"
+    Assertions are derived from ``ROUTING_TABLE`` rather than hard-coded model
+    names: the table is provider-swappable (it is overridden at import time from
+    the ``MODEL_ROUTING_TABLE`` env var), so pinning literal model names here
+    turns every provider migration into a false test failure.
+    """
 
-    def test_planner_returns_heavy_tier(self):
-        """Planner → qwen3.7-max-preview (heavy tier, complex planning)."""
+    def test_each_sdlc_role_returns_its_routed_model(self):
+        """Every SDLC role resolves to exactly the model in ROUTING_TABLE."""
         router = ModelRouter()
-        assert router.get_model_for("planner") == "qwen3.7-max-preview"
+        for role in ("supervisor", "planner", "coder", "tester", "reviewer"):
+            assert router.get_model_for(role) == ROUTING_TABLE[role]
 
-    def test_coder_returns_coding_specialist(self):
-        """Coder → qwen3-coder-plus (coding specialist)."""
+    def test_non_sdlc_roles_return_their_routed_model(self):
+        """Chat / session_naming also resolve through the routing table."""
         router = ModelRouter()
-        assert router.get_model_for("coder") == "qwen3-coder-plus"
+        for role in ("chat", "session_naming"):
+            assert router.get_model_for(role) == ROUTING_TABLE[role]
 
-    def test_tester_returns_medium_tier(self):
-        """Tester → qwen3.7-plus (medium tier, test execution)."""
+    def test_routed_models_are_non_empty_strings(self):
+        """The table never routes a role to an empty/blank model id."""
         router = ModelRouter()
-        assert router.get_model_for("tester") == "qwen3.7-plus"
-
-    def test_reviewer_returns_heavy_tier(self):
-        """Reviewer → qwen3.7-max-2026-06-08 (heavy tier, quality review)."""
-        router = ModelRouter()
-        assert router.get_model_for("reviewer") == "qwen3.7-max-2026-06-08"
+        for role in ROUTING_TABLE:
+            assert isinstance(router.get_model_for(role), str)
+            assert router.get_model_for(role).strip()
 
     def test_unknown_role_falls_back_to_default(self):
         """Unknown role returns settings.DEFAULT_LLM_MODEL."""
         router = ModelRouter()
-        with patch.object(settings, "DEFAULT_LLM_MODEL", "qwen3.7-plus"):
+        with patch.object(settings, "DEFAULT_LLM_MODEL", "sentinel-model-x"):
             result = router.get_model_for("nonexistent_role")
-            assert result == "qwen3.7-plus"
+            assert result == "sentinel-model-x"
 
 
 class TestModelRouterGetModelForCall:
@@ -80,24 +80,25 @@ class TestModelRouterGetModelForCall:
     def test_returns_none_when_routed_equals_default(self):
         """When routed model == default, returns None (omit model_name)."""
         router = ModelRouter()
-        # Patch default to match the supervisor's routed model
-        with patch.object(settings, "DEFAULT_LLM_MODEL", "qwen3.7-plus"):
+        # Patch the default to whatever the supervisor actually routes to, so
+        # the equality holds regardless of the configured provider.
+        with patch.object(settings, "DEFAULT_LLM_MODEL", ROUTING_TABLE["supervisor"]):
             result = router.get_model_for_call("supervisor")
             assert result is None
 
     def test_returns_model_name_when_routed_differs_from_default(self):
         """When routed model != default, returns the model name."""
         router = ModelRouter()
-        # Default is not qwen3-coder-plus (typically), so coder should return the name
-        with patch.object(settings, "DEFAULT_LLM_MODEL", "qwen3.7-plus"):
+        # A sentinel default can never equal a real routed model.
+        with patch.object(settings, "DEFAULT_LLM_MODEL", "sentinel-model-x"):
             result = router.get_model_for_call("coder")
-            assert result == "qwen3-coder-plus"
+            assert result == ROUTING_TABLE["coder"]
 
     def test_unknown_role_returns_none_when_default_matches(self):
         """Unknown role → default model; if default == default, returns None."""
         router = ModelRouter()
-        with patch.object(settings, "DEFAULT_LLM_MODEL", "qwen3.7-plus"):
-            # Unknown role → get_model_for returns "qwen3.7-plus" (the default)
+        with patch.object(settings, "DEFAULT_LLM_MODEL", "sentinel-model-x"):
+            # Unknown role → get_model_for returns the default ("sentinel-model-x")
             # Then get_model_for_call sees model == default → returns None
             result = router.get_model_for_call("unknown_role")
             assert result is None

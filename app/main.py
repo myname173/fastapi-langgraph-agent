@@ -48,6 +48,7 @@ from app.core.task_manager import task_manager
 from app.core.vllm_health import vllm_health_monitor
 from app.services.database import database_service
 from app.services.memory import memory_service
+from app.services.sdlc_task_service import sdlc_task_service
 
 # Load environment variables
 load_dotenv()
@@ -147,6 +148,17 @@ async def lifespan(app: FastAPI):
             await vllm_health_monitor.start()
         except Exception as e:
             logger.exception("vllm_health_monitor_start_failed", error=str(e))
+
+    # Reap SDLC tasks stranded in a non-terminal status by an interrupted run
+    # (process restart, crash, aborted SSE stream). Nothing else transitions
+    # them, so without this the 「进行中」 list fills with tasks that have been
+    # dead for weeks. Best-effort — never blocks startup.
+    try:
+        reaped = await sdlc_task_service.reap_stale_tasks()
+        if reaped:
+            logger.info("startup_stale_tasks_reaped", count=reaped)
+    except Exception as e:
+        logger.exception("startup_stale_task_reap_failed", error=str(e))
 
     yield
 

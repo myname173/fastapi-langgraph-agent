@@ -16,9 +16,13 @@ across the 5 agent node files:
 
 import dataclasses
 import inspect
+import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
+from langchain_core.exceptions import OutputParserException
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import Command
 
 from app.core.config import settings
@@ -187,7 +191,7 @@ def wrap_node_with_handoff(
     # Some nodes (planner) take only (state); others take (state, config).
     _accepts_config = len(inspect.signature(node_func).parameters) >= 2
 
-    async def _wrapped(state: Any, config: Any = None) -> Any:
+    async def _wrapped(state: Any, config: RunnableConfig | None = None) -> Any:
         if config is None:
             config = {}
 
@@ -252,6 +256,186 @@ def wrap_node_with_handoff(
 # ---------------------------------------------------------------------------
 
 
+def _extract_json_blob(text: str) -> str:
+    """Pull the first JSON object/array out of a free-form string.
+
+    Handles three common shapes from compatible-mode providers:
+    - fenced code blocks (```json ... ```)
+    - a bare JSON object/array
+    - prose wrapping a JSON object/array
+    """
+    if not text:
+        return ""
+    stripped = text.strip()
+    # fenced code block
+    if stripped.startswith("```"):
+        # drop opening fence (``` or ```json) and closing fence
+        body = stripped.split("\n", 1)[1] if "\n" in stripped else stripped
+        if body.rstrip().endswith("```"):
+            body = body.rstrip()[:-3]
+        stripped = body.strip()
+    try:
+        json.loads(stripped)
+        return stripped
+    except json.JSONDecodeError:
+        pass
+    # find outermost braces / brackets
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        start = stripped.find(open_ch)
+        if start == -1:
+            continue
+        depth = 0
+        for i in range(start, len(stripped)):
+            if stripped[i] == open_ch:
+                depth += 1
+            elif stripped[i] == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return stripped[start : i + 1]
+    return ""
+
+
+def _recover_structured_output(
+    message: BaseMessage,
+    response_format: type,
+    agent_name: str,
+    step: str,
+) -> Any:
+    """Recover a parsed schema instance when ``with_structured_output`` fails.
+
+    Compatible-mode providers sometimes return the raw ``AIMessage`` (with
+    ``additional_kwargs["parsed"]`` either missing or ``None``) instead of a
+    validated schema instance. This extracts the JSON from ``content`` or
+    ``additional_kwargs`` and validates it against ``response_format``.
+
+    Raises:
+        OutputParserException: If no valid JSON matching the schema can be
+        recovered — preserves the existing retry-on-parse-failure behaviour.
+    """
+    from langchain_core.exceptions import OutputParserException
+
+    raw_candidates: list = []
+    parsed_kw = message.additional_kwargs.get("parsed")
+    if parsed_kw:
+        raw_candidates.append(parsed_kw if isinstance(parsed_kw, str) else json.dumps(parsed_kw))
+    if isinstance(message.content, str):
+        raw_candidates.append(message.content)
+    elif isinstance(message.content, list):
+        # Some providers wrap content as a list of text parts
+        for part in message.content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                raw_candidates.append(part.get("text", ""))
+
+    last_error: Optional[Exception] = None
+    for raw in raw_candidates:
+        blob = _extract_json_blob(raw)
+        if not blob:
+            continue
+        try:
+            return response_format.model_validate_json(blob)
+        except Exception as e:  # noqa: BLE001 - try next candidate
+            last_error = e
+            logger.warning(
+                "sdlc_structured_recovery_failed",
+                agent_name=agent_name,
+                step=step,
+                error=str(e)[:200],
+            )
+    logger.error(
+        "sdlc_structured_recovery_exhausted",
+        agent_name=agent_name,
+        step=step,
+        content_preview=str(message.content)[:200],
+    )
+    raise OutputParserException(f"could not recover structured output for {response_format.__name__}") from last_error
+
+
+def _recover_from_parse_error(
+    exc: "OutputParserException",
+    response_format: type,
+    agent_name: str,
+    step: str,
+) -> Any:
+    """Best-effort recovery when ``with_structured_output`` raises.
+
+    Compatible-mode models sometimes emit a JSON *array* where the Pydantic
+    schema expects an *object* (e.g. returning the list of code changes
+    directly instead of a ``CoderOutput`` wrapper). LangChain surfaces this as
+    ``OutputParserException("Input should be an object")`` and discards the
+    payload. We recover by:
+
+    1. Pulling the raw model output from ``exc.llm_output`` (LangChain keeps it).
+    2. If it parses as a JSON array, wrap it into the first ``List[...]``-typed
+       field of ``response_format`` (e.g. ``code_changes``), then validate.
+    3. Otherwise try a direct object parse via ``model_validate_json``.
+
+    Returns the validated instance, or ``None`` if recovery is impossible (the
+    caller then re-raises, preserving the existing retry-on-failure behaviour).
+    """
+    raw = getattr(exc, "llm_output", None)
+    if isinstance(raw, BaseMessage):
+        raw = raw.content
+    if not raw:
+        return None
+    if not isinstance(raw, str):
+        raw = json.dumps(raw)
+    blob = _extract_json_blob(raw)
+    if not blob:
+        return None
+
+    # Case A: model returned an array but schema wants an object.
+    if blob.lstrip().startswith("["):
+        try:
+            arr = json.loads(blob)
+        except json.JSONDecodeError:
+            return None
+        # Find the first List[...]-typed field (including Optional[List[...]])
+        # and wrap the array there. Compatible-mode providers frequently emit
+        # the bare list of items instead of the {field: [...]} wrapper object.
+
+        for name, field in response_format.model_fields.items():
+            annotation = field.annotation
+            # Unwrap Optional[...] / Union[..., None] to the inner type.
+            origin = getattr(annotation, "__origin__", None)
+            args = getattr(annotation, "__args__", None) or ()
+            inner = annotation
+            if origin is Union:
+                # Optional[X] == Union[X, None]; pick the non-None member.
+                non_none = [a for a in args if a is not type(None)]
+                if non_none:
+                    inner = non_none[0]
+                    origin = getattr(inner, "__origin__", None)
+            if origin in (list, List):
+                try:
+                    wrapped = response_format.model_validate({name: arr})
+                    logger.warning(
+                        "sdlc_structured_recovered_array_as_object",
+                        agent_name=agent_name,
+                        step=step,
+                        field=name,
+                    )
+                    return wrapped
+                except Exception:  # noqa: BLE001 - fall through to next field
+                    continue
+        # Fallback: try validating the array directly (rare).
+        try:
+            return response_format.model_validate(arr)
+        except Exception:  # noqa: BLE001
+            return None
+
+    # Case B: model returned an object-shaped JSON; validate directly.
+    try:
+        return response_format.model_validate_json(blob)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "sdlc_structured_recovery_failed",
+            agent_name=agent_name,
+            step=step,
+            error=str(e)[:200],
+        )
+        return None
+
+
 async def call_llm_structured(
     ctx: AgentContext,
     agent_name: str,
@@ -296,8 +480,28 @@ async def call_llm_structured(
                 response_format=response_format,
                 metadata=get_node_metadata(agent_name, step, success=True),
             )
+        # S-1 fix: some compatible-mode providers (e.g. DashScope qwen via the
+        # OpenAI-compatible endpoint) return the raw AIMessage instead of a
+        # parsed schema instance when with_structured_output fails to surface the
+        # JSON. Recover by extracting JSON from content / additional_kwargs and
+        # validating it against response_format before giving up.
+        if isinstance(result, BaseMessage):
+            result = _recover_structured_output(result, response_format, agent_name, step)
         _success = True
         return result
+    except OutputParserException as e:
+        # S-6 fix: a frequent compatible-mode failure mode is the model returning
+        # a JSON *array* (e.g. the list of code changes) instead of the expected
+        # *object* wrapper (e.g. CoderOutput with a `code_changes` field).
+        # with_structured_output raises OutputParserException("Input should be an
+        # object") and discards the payload. Recover by re-parsing the raw LLM
+        # output: if it is an array, wrap it into the first List-typed field of
+        # the schema; otherwise try a direct object parse.
+        recovered = _recover_from_parse_error(e, response_format, agent_name, step)
+        if recovered is not None:
+            _success = True
+            return recovered
+        raise
     finally:
         _duration = time.perf_counter() - _start
         sdlc_agent_execution_seconds.labels(

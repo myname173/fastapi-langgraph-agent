@@ -11,8 +11,10 @@ from datetime import datetime, UTC
 
 from sqlmodel import Field, SQLModel
 
+from app.models.base import UTCDateTimeMixin
 
-class WatchlistItem(SQLModel, table=True):
+
+class WatchlistItem(UTCDateTimeMixin, SQLModel, table=True):
     """A single symbol in a user's watchlist."""
 
     __tablename__ = "watchlist_item"  # pyright: ignore[reportAssignmentType]

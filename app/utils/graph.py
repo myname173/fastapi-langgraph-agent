@@ -138,7 +138,7 @@ def prepare_messages(messages: list[Message], system_prompt: str) -> list[Messag
             dump_messages(messages),
             strategy="last",
             token_counter=_count_tokens_tiktoken,
-            max_tokens=settings.MAX_TOKENS,
+            max_tokens=settings.CHAT_CONTEXT_MAX_TOKENS,
             start_on="human",
             include_system=False,
             allow_partial=False,
@@ -157,6 +157,144 @@ def prepare_messages(messages: list[Message], system_prompt: str) -> list[Messag
             raise
 
     return [Message(role="system", content=system_prompt)] + trimmed_messages
+
+
+# Message "type"/"role" values grouped by how they participate in the
+# tool-calling protocol. Used by :func:`sanitize_tool_call_history`.
+_TOOL_CALLING_KINDS = frozenset({"ai", "assistant"})
+_TOOL_RESULT_KINDS = frozenset({"tool"})
+_TOOL_SCOPE_RESET_KINDS = frozenset({"human", "user", "system"})
+
+
+def _message_kind(msg: object) -> str:
+    """Return the normalised message kind for a dict or ``BaseMessage``."""
+    if isinstance(msg, dict):
+        return str(msg.get("type") or msg.get("role") or "")
+    return str(getattr(msg, "type", "") or getattr(msg, "role", "") or "")
+
+
+def _message_tool_calls(msg: object) -> list:
+    """Return the assistant ``tool_calls`` list (empty when absent)."""
+    if isinstance(msg, dict):
+        return list(msg.get("tool_calls") or [])
+    return list(getattr(msg, "tool_calls", None) or [])
+
+
+def _tool_call_id_of(tool_call: object) -> str | None:
+    """Return the ``id`` of a single tool call (dict or ``ToolCall``)."""
+    if isinstance(tool_call, dict):
+        return tool_call.get("id")
+    return getattr(tool_call, "id", None)
+
+
+def _message_tool_call_id(msg: object) -> str | None:
+    """Return the ``tool_call_id`` of a tool-result message."""
+    if isinstance(msg, dict):
+        return msg.get("tool_call_id")
+    return getattr(msg, "tool_call_id", None)
+
+
+def _message_content_is_empty(msg: object) -> bool:
+    """True when the message carries no textual content."""
+    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return not content.strip()
+    return len(content) == 0
+
+
+def sanitize_tool_call_history(messages: list) -> list:
+    """Drop tool-call payloads the provider API would reject.
+
+    OpenAI-compatible endpoints (including DeepSeek) reject a request when:
+
+    * a message with role ``tool`` is not preceded by an assistant message
+      declaring a matching ``tool_calls`` id (orphan tool result), or
+    * an assistant message declares ``tool_calls`` that are never answered.
+
+    Two code paths in the SDLC graph can produce such a state:
+
+    1. Synthetic tool results that belong to no assistant tool call — e.g.
+       the tester node force-invoking ``run_tests`` and tagging the result
+       with a made-up ``tool_call_id`` (``"auto_run_tests"``).
+    2. Context trimming (:func:`_trim_messages`) cutting an assistant
+       ``tool_calls`` message away from the tool messages that answer it,
+       or keeping a tool message whose declaring assistant was dropped.
+
+    This normaliser makes the payload API-valid again by removing orphaned
+    tool results and stripping unanswered ``tool_calls`` entries. Messages
+    with no tool-call involvement pass through untouched.
+
+    Args:
+        messages: The raw conversation history (dicts or ``BaseMessage``).
+
+    Returns:
+        A history whose tool-call pairing is internally consistent.
+    """
+    if not messages:
+        return messages
+
+    # ---- Pass 1: determine which tool_call ids are legitimately answered.
+    declared: set[str] = set()
+    answered: set[str] = set()
+    for msg in messages:
+        kind = _message_kind(msg)
+        if kind in _TOOL_CALLING_KINDS:
+            declared = set()
+            for tool_call in _message_tool_calls(msg):
+                call_id = _tool_call_id_of(tool_call)
+                if call_id:
+                    declared.add(call_id)
+        elif kind in _TOOL_RESULT_KINDS:
+            call_id = _message_tool_call_id(msg)
+            if call_id and call_id in declared:
+                answered.add(call_id)
+        elif kind in _TOOL_SCOPE_RESET_KINDS:
+            declared = set()
+
+    # ---- Pass 2: rebuild a payload the API will accept.
+    cleaned: list = []
+    dropped_tool_results = 0
+    stripped_tool_calls = 0
+    for msg in messages:
+        kind = _message_kind(msg)
+
+        if kind in _TOOL_RESULT_KINDS:
+            call_id = _message_tool_call_id(msg)
+            if not call_id or call_id not in answered:
+                dropped_tool_results += 1
+                continue
+            cleaned.append(msg)
+            continue
+
+        if kind in _TOOL_CALLING_KINDS:
+            tool_calls = _message_tool_calls(msg)
+            if tool_calls:
+                kept = [tc for tc in tool_calls if _tool_call_id_of(tc) in answered]
+                if len(kept) != len(tool_calls):
+                    stripped_tool_calls += len(tool_calls) - len(kept)
+                    if not kept and _message_content_is_empty(msg):
+                        # Nothing left to convey — drop the empty shell.
+                        continue
+                    if isinstance(msg, dict):
+                        msg = {**msg, "tool_calls": kept}
+                    else:
+                        msg = msg.model_copy(update={"tool_calls": kept})
+            cleaned.append(msg)
+            continue
+
+        cleaned.append(msg)
+
+    if dropped_tool_results or stripped_tool_calls:
+        logger.warning(
+            "sdlc_tool_call_history_sanitized",
+            dropped_tool_results=dropped_tool_results,
+            stripped_tool_calls=stripped_tool_calls,
+            original_count=len(messages),
+            sanitized_count=len(cleaned),
+        )
+    return cleaned
 
 
 def prepare_sdlc_messages(messages: list[dict], system_prompt: str) -> list[dict]:
@@ -185,7 +323,7 @@ def prepare_sdlc_messages(messages: list[dict], system_prompt: str) -> list[dict
         list[dict]: The prepared messages with system prompt prepended.
     """
     if not settings.ENABLE_SDLC_CONTEXT_TRIM:
-        return [{"role": "system", "content": system_prompt}] + messages
+        return [{"role": "system", "content": system_prompt}] + sanitize_tool_call_history(messages)
 
     try:
         trimmed = _trim_messages(
@@ -209,7 +347,9 @@ def prepare_sdlc_messages(messages: list[dict], system_prompt: str) -> list[dict
         else:
             raise
 
-    return [{"role": "system", "content": system_prompt}] + trimmed
+    # Trimming may have split an assistant tool_calls message from its tool
+    # results (or vice-versa). Normalise before the payload reaches the API.
+    return [{"role": "system", "content": system_prompt}] + sanitize_tool_call_history(trimmed)
 
 
 def code_changes_reducer(existing: list[dict], updates: list[dict]) -> list[dict]:

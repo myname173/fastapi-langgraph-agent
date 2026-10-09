@@ -1,5 +1,7 @@
 """Long-term memory service using mem0 and pgvector with semantic cache layer."""
 
+import os
+
 from mem0 import AsyncMemory
 
 from app.core.config import settings
@@ -17,6 +19,58 @@ _memory_breaker = CircuitBreaker(
     failure_threshold=5,
     cooldown_seconds=60.0,
 )
+
+# Minimum cosine similarity for a memory to be considered relevant.
+# Without this filter, mem0 returns ALL stored memories for the user
+# regardless of relevance — e.g., when the user asks about "半导体" but
+# the only stored memories are about "600519", those irrelevant memories
+# get injected into the prompt and bias the LLM to respond about the
+# wrong stock.
+_MEMORY_RELEVANCE_THRESHOLD = 0.7
+
+# When long-term memory (mem0/pgvector) is unavailable — e.g. in the
+# offline SDLC eval harness where no Postgres is provisioned — set
+# MEMORY_SERVICE_ENABLED=false to short-circuit every search()/add() call
+# and avoid a 30s pgvector connection timeout per request. Production keeps
+# this enabled (default).
+_MEMORY_SERVICE_ENABLED = os.getenv("MEMORY_SERVICE_ENABLED", "true").lower() not in (
+    "false",
+    "0",
+    "no",
+)
+
+
+def _filter_messages_for_memory(messages: list[dict]) -> list[dict]:
+    """Drop noise roles so mem0 extracts memories from real dialogue only.
+
+    Tool results (``role="tool"``) and system prompts are excluded — they
+    carry raw market/news data and instructions, not user facts, and mem0's
+    extraction LLM would otherwise distill them into misleading memories
+    (e.g. extracting "用户关注贵州茅台" from a tool result that merely quoted
+    茅台's price while answering a sector question about 半导体). Assistant
+    turns that are pure ``tool_calls`` (no textual content) are also dropped.
+
+    Args:
+        messages: OpenAI-format messages to be persisted via mem0 ``add``.
+
+    Returns:
+        Filtered list keeping only ``user`` messages and ``assistant``
+        messages that carry textual content.
+    """
+    out: list[dict] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "")
+        if role in ("system", "tool"):
+            continue
+        if role == "assistant":
+            content = m.get("content")
+            if not (isinstance(content, str) and content.strip()):
+                # Assistant turn with only tool_calls / empty content.
+                continue
+        out.append(m)
+    return out
 
 
 class MemoryService:
@@ -42,7 +96,7 @@ class MemoryService:
                             # Critical: must match embedder's embedding_dims.
                             # PGVectorConfig defaults to 1536 (OpenAI
                             # text-embedding-3-small), but Bailian
-                            # text-embedding-v3 uses 1024. Without this,
+                            # qwen3.7-text-embedding uses 1024. Without this,
                             # the table is created as vector(1536) while
                             # the embedder returns 1024-dim vectors, causing
                             # "expected 1536 dimensions, not 1024" on INSERT.
@@ -51,18 +105,37 @@ class MemoryService:
                     },
                     "llm": {
                         "provider": "openai",
-                        "config": {"model": settings.LONG_TERM_MEMORY_MODEL},
+                        "config": {
+                            "model": settings.LONG_TERM_MEMORY_MODEL,
+                            # mem0 falls back to os.getenv("OPENAI_API_KEY"),
+                            # but this project injects the key via Docker
+                            # secrets (CHAT_API_KEY_FILE) — the process env
+                            # var stays empty, so mem0 would 401. Pass the key
+                            # and base_url explicitly from settings instead.
+                            # This is the fact-extraction LLM → CHAT provider.
+                            "api_key": settings.CHAT_API_KEY,
+                            "openai_base_url": settings.CHAT_BASE_URL,
+                        },
                     },
                     "embedder": {
                         "provider": "openai",
                         "config": {
                             "model": settings.LONG_TERM_MEMORY_EMBEDDER_MODEL,
-                            # Critical for Bailian text-embedding-v3: the model
-                            # only supports dims in {64,128,256,512,768,1024}.
+                            # Critical for Bailian qwen3.7-text-embedding: the
+                            # model only supports dims in
+                            # {256,512,768,1024,1536,2048,2560}.
                             # Without embedding_dims, mem0 defaults to OpenAI's
                             # 1536, which causes "dimension mismatch" errors
                             # when inserting vectors into pgvector.
                             "embedding_dims": settings.LONG_TERM_MEMORY_EMBEDDING_DIM,
+                            # Same Docker-secrets rationale as the llm block:
+                            # pass key + base_url explicitly so mem0 doesn't
+                            # fall back to an empty OPENAI_API_KEY env var.
+                            # Embeddings may live on a DIFFERENT vendor than
+                            # chat (DeepSeek has no /embeddings endpoint), so
+                            # this block uses the EMBEDDING_* provider.
+                            "api_key": settings.EMBEDDING_API_KEY,
+                            "openai_base_url": settings.EMBEDDING_BASE_URL,
                         },
                     },
                 }
@@ -91,6 +164,10 @@ class MemoryService:
         """
         if user_id is None:
             return ""
+        # Offline mode (no Postgres): skip mem0 entirely to avoid 30s pgvector
+        # connection timeouts per request.
+        if not _MEMORY_SERVICE_ENABLED:
+            return ""
         # M-16 fix: short-circuit when pgvector is persistently down. This
         # check runs BEFORE the semantic cache so that an open circuit
         # returns "" without caching the empty result — caching "" would
@@ -106,7 +183,27 @@ class MemoryService:
                 if filters:
                     search_kwargs["filters"] = filters
                 results = await memory.search(**search_kwargs)
-                return "\n".join([f"* {r['memory']}" for r in results["results"]])
+                # Filter by relevance: only include memories whose cosine
+                # similarity >= threshold. Without this, mem0 returns ALL
+                # stored memories regardless of relevance, causing the LLM
+                # to be biased by irrelevant context (e.g., user asks about
+                # "半导体" but sees memories about "600519" and responds
+                # about the wrong stock).
+                relevant_memories = []
+                for r in results.get("results", []):
+                    score = r.get("score")
+                    # If score is unavailable (some backends don't return
+                    # it), include the result for backward compatibility.
+                    if score is None or float(score) >= _MEMORY_RELEVANCE_THRESHOLD:
+                        relevant_memories.append(r["memory"])
+                if not relevant_memories:
+                    logger.debug(
+                        "memory_search_all_below_threshold",
+                        user_id=user_id,
+                        total=len(results.get("results", [])),
+                        threshold=_MEMORY_RELEVANCE_THRESHOLD,
+                    )
+                return "\n".join([f"* {m}" for m in relevant_memories])
 
             async def _guarded_search() -> str:
                 # Record success/failure only on an actual mem0 call (cache
@@ -141,9 +238,22 @@ class MemoryService:
         """
         if user_id is None:
             return
+        # Offline mode (no Postgres): skip mem0 entirely.
+        if not _MEMORY_SERVICE_ENABLED:
+            return
         # M-16 fix: short-circuit when pgvector is persistently down.
         if _memory_breaker.is_open:
             logger.debug("memory_add_short_circuited", user_id=user_id)
+            return
+        # Phase 3: filter noise roles before persistence so mem0 extracts
+        # memories from real dialogue only, not tool results or system
+        # prompts. Without this, mem0's extraction LLM distills tool-returned
+        # price/news data into misleading memories (e.g. "用户关注贵州茅台"
+        # extracted from a quote payload while answering a 半导体 question),
+        # which then pollute retrieval and bias the next answer.
+        messages = _filter_messages_for_memory(messages)
+        if not messages:
+            logger.debug("memory_add_skipped_no_dialogue", user_id=user_id)
             return
         try:
             memory = await self._get_memory()
