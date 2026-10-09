@@ -328,7 +328,7 @@ class SDLCEvaluator:
 
                     for _role in list(_rt.ROUTING_TABLE.keys()):
                         _rt.ROUTING_TABLE[_role] = _tm
-                    _rt.model_router.ROUTING_TABLE = _rt.ROUTING_TABLE
+                    _rt.model_router.ROUTING_TABLE = _rt.ROUTING_TABLE  # type: ignore[attr-defined]
                     _llm = _rg._build_llm(_tm)
                     _rg.LLMRegistry.LLMS = [{"name": _tm, "llm": _llm}]
                 except Exception as _me:  # noqa: BLE001
@@ -343,7 +343,7 @@ class SDLCEvaluator:
                 # Turn a hung test into a failed result instead of killing the run.
                 result = SDLCEvalResult(
                     test_name=test["name"],
-                    test_id=test.get("name"),
+                    test_id=test["name"],
                     status="failed",
                     steps_completed=0,
                     total_steps=4,

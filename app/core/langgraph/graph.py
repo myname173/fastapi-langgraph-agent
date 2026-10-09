@@ -350,7 +350,7 @@ class LangGraphAgent:
         intent_result: IntentResult | None = config.get("metadata", {}).get("intent_result")
         if intent_result is None and settings.ENABLE_CHAT_MODEL_ROUTING:
             intent_result = await classify_chat_intent(last_user_text)
-        if settings.ENABLE_CHAT_MODEL_ROUTING:
+        if settings.ENABLE_CHAT_MODEL_ROUTING and intent_result is not None:
             intent = intent_result.intent
             if intent == ChatIntent.CASUAL and settings.ENABLE_LOCAL_CHAT_TIER:
                 # Short chit-chat -> local 1.5B (free, low latency). Use the

@@ -38,6 +38,10 @@ with open(_SECRETS, "r", encoding="utf-8") as fh:
     _key = fh.read().strip()
 
 from openai import OpenAI  # noqa: E402  (must import after env setup)
+from openai.types.chat import (  # noqa: E402
+    ChatCompletionMessageParam,
+    ChatCompletionToolParam,
+)
 
 BASE_URL = os.getenv("CHAT_BASE_URL", "https://api.deepseek.com")
 MODELS = ["deepseek-flash", "deepseek-v4-pro"]
@@ -45,7 +49,7 @@ MODELS = ["deepseek-flash", "deepseek-v4-pro"]
 # A tool definition forces the model down the tool-calling path, which is where
 # the reasoning_content requirement bites. A plain chat completion will NOT
 # reproduce the bug, so the probe must offer a tool.
-_TOOLS = [
+_TOOLS: list[ChatCompletionToolParam] = [
     {
         "type": "function",
         "function": {
@@ -74,7 +78,7 @@ _VARIANTS: list[tuple[str, dict]] = [
 
 def _probe(client: OpenAI, model: str, label: str, extra: dict) -> None:
     """Run one tool-calling turn and report whether it survived."""
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {"role": "user", "content": "What is the price of AAPL? Use the tool."},
     ]
     t0 = time.time()
@@ -101,6 +105,7 @@ def _probe(client: OpenAI, model: str, label: str, extra: dict) -> None:
                     "function": {"name": tc.function.name, "arguments": tc.function.arguments},
                 }
                 for tc in msg.tool_calls
+                if tc.type == "function"
             ],
         }
     )

@@ -4,7 +4,7 @@ import shutil
 from datetime import datetime, timedelta, UTC
 from typing import List, Optional
 
-from sqlmodel import Session, desc, select
+from sqlmodel import Session, col, desc, select
 
 from app.core.config import settings
 from app.core.db.session import get_async_session_maker
@@ -502,7 +502,7 @@ class SDLCTaskService:
                     # whose value set is the member *names* ('PLANNING', ...);
                     # the bind processor normalises members (and their .value
                     # strings) to those names, so this matches what is stored.
-                    SDLCTask.status.in_(self.ACTIVE_STATUSES),
+                    col(SDLCTask.status).in_(self.ACTIVE_STATUSES),
                     SDLCTask.updated_at < cutoff,
                 )
             )
@@ -530,7 +530,7 @@ class SDLCTaskService:
         async with get_async_session_maker()() as session:
             result = await session.execute(
                 select(SDLCTask).where(
-                    SDLCTask.status.in_(self.ACTIVE_STATUSES),
+                    col(SDLCTask.status).in_(self.ACTIVE_STATUSES),
                     SDLCTask.updated_at < cutoff,
                 )
             )

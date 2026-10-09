@@ -142,8 +142,8 @@ def _render_news(header: str, news: list[dict]) -> str:
 
 @tool
 async def fetch_news_sentiment(
-    symbol: str = None,
-    keyword: str = None,
+    symbol: str | None = None,
+    keyword: str | None = None,
     limit: int = 10,
 ) -> str:
     """获取个股公告或行业快讯并做情绪评分（基本面/情绪面分析的输入）.

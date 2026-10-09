@@ -95,7 +95,7 @@ try:
 
     for _role in list(_router.ROUTING_TABLE.keys()):
         _router.ROUTING_TABLE[_role] = _MODEL_DEFAULT
-    _router.model_router.ROUTING_TABLE = _router.ROUTING_TABLE
+    _router.model_router.ROUTING_TABLE = _router.ROUTING_TABLE  # type: ignore[attr-defined]
     _default_llm = _registry._build_llm(_MODEL_DEFAULT)
     _registry.LLMRegistry.LLMS = [{"name": _MODEL_DEFAULT, "llm": _default_llm}]
     _LOGGER.warning("eval_model_override_applied", default=_MODEL_DEFAULT, strong=_MODEL_STRONG)
